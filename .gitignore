@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# crawler output
+data/
+*.log
+
+# editors
+.idea/
+.vscode/
+.DS_Store
+
+# misc
+coverage/
+*.tsbuildinfo

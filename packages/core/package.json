@@ -1,0 +1,14 @@
+{
+  "name": "@jscrawlers/core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared helpers for all crawlers: logging, HTTP with retry, throttling, output storage",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
