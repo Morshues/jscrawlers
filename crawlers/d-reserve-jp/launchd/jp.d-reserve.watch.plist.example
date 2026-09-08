@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Runs one poll every 5 minutes. Each firing is an independent process, so a
+  crash or a hung request costs a single poll instead of ending the watch.
+  Install instructions and the resident-mode variant are in ../README.md.
+
+  Replace /Users/YOU/git/jscrawlers with the real checkout path, and
+  /usr/local/bin/node with the output of `which node`. nvm users must use the
+  absolute path from `nvm which 24`: launchd does not read your shell profile.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>jp.d-reserve.watch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>--env-file=/Users/YOU/git/jscrawlers/.env</string>
+    <string>/Users/YOU/git/jscrawlers/crawlers/d-reserve-jp/src/index.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/git/jscrawlers</string>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/git/jscrawlers/data/d-reserve-jp/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/git/jscrawlers/data/d-reserve-jp/launchd.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+</dict>
+</plist>

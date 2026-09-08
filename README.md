@@ -90,6 +90,9 @@ thrown error into exit code 1.
 - `saveJson` / `saveJsonl` / `appendJsonl` / `readJson` / `outputDir` — write to
   `data/<crawler>/`; `{stamp}` in a filename becomes a UTC timestamp
 - `parseArgs(options)` — a thin wrapper over `node:util` for crawler CLI flags
+- `createNotifier({ channels })` — push a payload to `webhook` / `telegram` /
+  `command` (JSON on stdin) channels; each is independent and `notify()` never
+  throws, so a broken channel cannot take a crawler down
 
 ## Conventions
 
