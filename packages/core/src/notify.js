@@ -105,7 +105,9 @@ async function sendCommand(payload, { env, logger, signal }) {
     });
 
     child.stdin.on('error', () => {}); // command may not read stdin; that is fine
-    child.stdin.end(JSON.stringify(payload));
+    // Trailing newline so line-oriented consumers (`cat >> log.jsonl`, `read`)
+    // see one record per line instead of concatenated JSON.
+    child.stdin.end(JSON.stringify(payload) + '\n');
   });
 }
 

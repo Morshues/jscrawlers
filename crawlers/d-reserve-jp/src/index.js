@@ -16,9 +16,11 @@ import { fetchSnapshot } from './api.js';
 import { diffSnapshots } from './diff.js';
 import { selectNotifications, buildPayloads } from './watch.js';
 import { readHistory, buildReport, formatReport } from './report.js';
+import { pendingWindows, summarizeWindow, buildSummaryPayloads } from './daily-summary.js';
 
 const NAME = 'd-reserve-jp';
 const STATE_FILE = 'state.json';
+const DAILY_STATE_FILE = 'daily-summary-state.json';
 
 const { values } = parseArgs({
   interval: { type: 'string' }, // "5m" -> stay resident; absent -> one shot
@@ -26,6 +28,7 @@ const { values } = parseArgs({
   since: { type: 'string' },
   'dry-run': { type: 'boolean', default: false },
   'notify-test': { type: 'boolean', default: false },
+  'daily-summary': { type: 'boolean', default: false },
 });
 
 /**
@@ -174,6 +177,120 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
   return { snapshot, events, matches, fresh, notified: fresh.length > 0 };
 }
 
+/**
+ * Send every daily digest still owed, oldest first.
+ *
+ * The checkpoint only moves once a window's segments have all been delivered on
+ * every configured channel, so a missed schedule, a sleeping Mac or a Telegram
+ * failure is recovered by simply running again. That makes delivery
+ * at-least-once: a failure partway through a multi-segment window resends the
+ * whole window on retry. Duplicates are recoverable; a gap is not.
+ */
+async function runDailySummary({ config, log, signal, notify, dryRun }) {
+  const checkpoint = (await readJson(NAME, DAILY_STATE_FILE)) ?? {};
+  const { daily } = config;
+
+  const { windows, skipped, realigned } = pendingWindows({
+    lastWindowEnd: checkpoint.lastWindowEnd ?? null,
+    now: Date.now(),
+    timeZone: daily.timeZone,
+    hour: daily.hour,
+    maxBackfill: daily.maxBackfill,
+  });
+
+  if (realigned) {
+    log.warn(
+      `checkpoint did not sit on the ${daily.hour}:00 ${daily.timeZone} grid ` +
+        '(DRESERVE_DAILY_TZ/HOUR changed?); snapped back to the previous boundary',
+    );
+  }
+  if (skipped.length > 0) {
+    log.warn(
+      `${skipped.length} window(s) beyond DRESERVE_DAILY_MAX_BACKFILL=${daily.maxBackfill} ` +
+        `were skipped: ${skipped[0].startDate} → ${skipped.at(-1).endDate}`,
+    );
+  }
+  if (windows.length === 0) {
+    log.info('no windows due — the latest digest has already been delivered');
+    return { sent: 0, skipped: skipped.length };
+  }
+
+  const history = await readHistory(NAME);
+  log.info(`${windows.length} window(s) due, ${history.events.length} events on file`);
+
+  let sent = 0;
+  for (const [index, window] of windows.entries()) {
+    if (signal.aborted) break;
+
+    const summary = summarizeWindow(history, window, config);
+    // Only the first message of the batch carries the skip notice.
+    const skippedNote =
+      index === 0 && skipped.length > 0
+        ? `※ ${skipped.length} 期分をスキップしました（${skipped[0].startDate} → ${skipped.at(-1).endDate}）`
+        : undefined;
+    const payloads = buildSummaryPayloads(summary, config, { skippedNote });
+
+    if (dryRun) {
+      log.info(`[dry-run] ${window.startDate} → ${window.endDate}, ${payloads.length} segment(s)`);
+      for (const payload of payloads) console.log(`\n--- ${payload.title} ---\n${payload.text}`);
+      continue;
+    }
+
+    let delivered = true;
+    for (const payload of payloads) {
+      const results = await notify(payload, { signal });
+      // No channel configured means nothing can be confirmed delivered, so the
+      // checkpoint must not advance past data nobody received.
+      if (results.length === 0 || results.some((result) => !result.ok)) {
+        delivered = false;
+        break;
+      }
+    }
+
+    if (!delivered) {
+      const failures = (checkpoint.consecutiveFailures ?? 0) + 1;
+      await saveJson(NAME, DAILY_STATE_FILE, { ...checkpoint, consecutiveFailures: failures });
+      log.error(
+        `delivery failed for ${window.startDate} → ${window.endDate}; checkpoint not advanced ` +
+          `(consecutive failures: ${failures})`,
+      );
+      if (failures >= 3) {
+        log.error(
+          'the same window has now failed 3+ times. It will keep retrying and no digest can ' +
+            'advance past it — fix the channel, or remove it from DRESERVE_DAILY_CHANNELS / ' +
+            'DRESERVE_NOTIFY_CHANNELS.',
+        );
+      }
+      process.exitCode = 1;
+      return { sent, skipped: skipped.length, failedAt: window.endDate };
+    }
+
+    const recent = [
+      ...(checkpoint.recent ?? []),
+      {
+        windowEnd: new Date(window.end).toISOString(),
+        segments: payloads.length,
+        deliveredAt: new Date().toISOString(),
+      },
+    ].slice(-10);
+
+    Object.assign(checkpoint, {
+      timeZone: daily.timeZone,
+      boundaryHour: daily.hour,
+      lastWindowEnd: new Date(window.end).toISOString(),
+      lastDeliveredAt: new Date().toISOString(),
+      consecutiveFailures: 0,
+      recent,
+    });
+    await saveJson(NAME, DAILY_STATE_FILE, checkpoint);
+
+    sent++;
+    log.info(`delivered ${window.startDate} → ${window.endDate} (${payloads.length} segment(s))`);
+  }
+
+  return { sent, skipped: skipped.length };
+}
+
 async function runReport({ config, log }) {
   const history = await readHistory(NAME);
   const state = await readJson(NAME, STATE_FILE);
@@ -191,6 +308,19 @@ await runCrawler(NAME, async ({ log, signal }) => {
   const config = loadConfig();
 
   if (values.report) return runReport({ config, log });
+
+  if (values['daily-summary']) {
+    // Falls back to the shared channel list so one .env covers both jobs.
+    const channels =
+      config.daily.channels.length > 0 ? config.daily.channels : config.notify.channels;
+    return runDailySummary({
+      config,
+      log,
+      signal,
+      notify: createNotifier({ channels, logger: log }),
+      dryRun: values['dry-run'],
+    });
+  }
 
   const notify = createNotifier({ channels: config.notify.channels, logger: log });
 

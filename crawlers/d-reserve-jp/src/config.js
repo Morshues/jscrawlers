@@ -127,6 +127,17 @@ export function addDays(date, days) {
   return stamp.toISOString().slice(0, 10);
 }
 
+/** Reject a mistyped IANA zone at startup rather than at 20:00 three days later. */
+function timeZone(env, key, fallback) {
+  const value = optional(env, key, fallback);
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+  } catch {
+    throw new Error(`${key} is not a valid IANA time zone, got "${value}"`);
+  }
+  return value;
+}
+
 const DAYS_OF_WEEK = new Set([
   'MONDAY',
   'TUESDAY',
@@ -157,6 +168,11 @@ export function loadConfig(env = process.env) {
   }
 
   const maxPrice = optional(env, 'DRESERVE_WATCH_MAX_PRICE');
+
+  const dailyHour = number(env, 'DRESERVE_DAILY_HOUR', 20);
+  if (!Number.isInteger(dailyHour) || dailyHour < 0 || dailyHour > 23) {
+    throw new Error(`DRESERVE_DAILY_HOUR must be an integer 0-23, got "${dailyHour}"`);
+  }
 
   return {
     apiBase: optional(env, 'DRESERVE_API_BASE', 'https://d-reserve.jp'),
@@ -196,6 +212,17 @@ export function loadConfig(env = process.env) {
       grouped: bool(env, 'DRESERVE_NOTIFY_GROUPED', true),
       onFirstRun: bool(env, 'DRESERVE_NOTIFY_ON_FIRST_RUN', false),
       bookingUrl: optional(env, 'DRESERVE_BOOKING_URL'),
+    },
+
+    // The daily digest is deliberately independent of the watch filter: the
+    // immediate alerts narrow to the date being booked, the digest is how the
+    // release pattern across every date becomes visible.
+    daily: {
+      timeZone: timeZone(env, 'DRESERVE_DAILY_TZ', 'Asia/Taipei'),
+      hour: dailyHour,
+      channels: list(env, 'DRESERVE_DAILY_CHANNELS'),
+      maxBackfill: number(env, 'DRESERVE_DAILY_MAX_BACKFILL', 7),
+      maxChars: number(env, 'DRESERVE_DAILY_MAX_CHARS', 3500),
     },
 
     reportTz: optional(env, 'DRESERVE_REPORT_TZ', 'Asia/Tokyo'),

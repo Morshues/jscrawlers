@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sends the daily digest at 20:00. Runs alongside the 5-minute polling job.
+  Install instructions are in ../README.md.
+
+  Replace /Users/YOU/git/jscrawlers with the real checkout path, and
+  /usr/local/bin/node with the output of `which node`. nvm users must use the
+  absolute path from `nvm which 24`: launchd does not read your shell profile.
+
+  StartCalendarInterval follows the SYSTEM timezone. If the machine is not set
+  to DRESERVE_DAILY_TZ the job simply fires at a different moment; the digest
+  window comes from the checkpoint, not from the launch time, so the content
+  stays correct and any missed period is backfilled on the next run.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>jp.d-reserve.daily</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>--env-file=/Users/YOU/git/jscrawlers/.env</string>
+    <string>/Users/YOU/git/jscrawlers/crawlers/d-reserve-jp/src/index.js</string>
+    <string>--daily-summary</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/git/jscrawlers</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>20</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/git/jscrawlers/data/d-reserve-jp/daily.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/git/jscrawlers/data/d-reserve-jp/daily.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+  </dict>
+</dict>
+</plist>

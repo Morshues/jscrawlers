@@ -24,14 +24,16 @@ The first run seeds the baseline and deliberately sends no alert (see
 
 ## Commands
 
-| Command                      | What it does                                                     |
-| ---------------------------- | ---------------------------------------------------------------- |
-| `npm run crawl d-reserve-jp` | One poll, then exit. This is what cron/launchd runs.             |
-| `... -- --interval 5m`       | Stay resident and poll on a timer. Ctrl-C stops it.              |
-| `... -- --dry-run`           | Fetch and show what _would_ happen. No state, no alerts.         |
-| `... -- --notify-test`       | Send one fake alert to check your channels. Exits 1 if any fail. |
-| `... -- --report`            | Statistics from local data. Never touches the network.           |
-| `... -- --report --since 7d` | Same, limited to a recent window.                                |
+| Command                            | What it does                                                         |
+| ---------------------------------- | -------------------------------------------------------------------- |
+| `npm run crawl d-reserve-jp`       | One poll, then exit. This is what cron/launchd runs.                 |
+| `... -- --interval 5m`             | Stay resident and poll on a timer. Ctrl-C stops it.                  |
+| `... -- --dry-run`                 | Fetch and show what _would_ happen. No state, no alerts.             |
+| `... -- --notify-test`             | Send one fake alert to check your channels. Exits 1 if any fail.     |
+| `... -- --report`                  | Statistics from local data. Never touches the network.               |
+| `... -- --report --since 7d`       | Same, limited to a recent window.                                    |
+| `... -- --daily-summary`           | Send every daily digest still owed. This is what the 20:00 job runs. |
+| `... -- --daily-summary --dry-run` | Print the digests instead of sending; leaves the checkpoint alone.   |
 
 ## The API
 
@@ -67,13 +69,14 @@ No auth, no cookies, and `robots.txt` is a 404. Findings worth knowing:
 Everything lives in the repo-root `.env` (git-ignored); `.env.example` documents
 every key. The essentials:
 
-| Env                                       | Meaning                                                 |
-| ----------------------------------------- | ------------------------------------------------------- |
-| `DRESERVE_HOTEL_CODE`                     | The hotel, e.g. `0000001834`                            |
-| `DRESERVE_FROM_DATE` / `DRESERVE_TO_DATE` | Check-in range to watch, `YYYY-MM-DD`                   |
-| `DRESERVE_LODGER_NUM`                     | Party size — **changes which rooms and prices you see** |
-| `DRESERVE_INTERVAL`                       | Resident-mode cadence, e.g. `5m`                        |
-| `DRESERVE_REPORT_TZ`                      | Timezone for release-time stats (default `Asia/Tokyo`)  |
+| Env                                         | Meaning                                                 |
+| ------------------------------------------- | ------------------------------------------------------- |
+| `DRESERVE_HOTEL_CODE`                       | The hotel, e.g. `0000001834`                            |
+| `DRESERVE_FROM_DATE` / `DRESERVE_TO_DATE`   | Check-in range to watch, `YYYY-MM-DD`                   |
+| `DRESERVE_LODGER_NUM`                       | Party size — **changes which rooms and prices you see** |
+| `DRESERVE_INTERVAL`                         | Resident-mode cadence, e.g. `5m`                        |
+| `DRESERVE_REPORT_TZ`                        | Timezone for release-time stats (default `Asia/Tokyo`)  |
+| `DRESERVE_DAILY_TZ` / `DRESERVE_DAILY_HOUR` | Digest window boundary (default `Asia/Taipei` 20:00)    |
 
 ### What to alert on
 
@@ -124,6 +127,47 @@ A cancellation stays bookable across many polls. Alerts therefore fire on the
 room is still open. When a room closes again, its bookkeeping is dropped, so a
 later reopening counts as a fresh alert.
 
+### The daily digest
+
+`--daily-summary` sends one message per day covering everything the watcher
+recorded. It is independent of the watch filter: immediate alerts narrow to the
+date you are booking, while the digest covers **every** room and date, which is
+how the release pattern becomes visible.
+
+Each digest covers a fixed half-open window:
+
+```
+[ previous day 20:00 (inclusive) , today 20:00 (exclusive) )
+```
+
+in `DRESERVE_DAILY_TZ`. An event at exactly 20:00:00 belongs to the _next_
+window, so **every event lands in exactly one digest** — yesterday 20:00–24:00
+arrives in the report sent at 20:00 today.
+
+Which windows to send comes from a checkpoint
+(`data/d-reserve-jp/daily-summary-state.json`), never from "now". So a sleeping
+Mac, a missed schedule or a Telegram outage is recovered by simply running
+again: pending windows go out oldest-first. Boundaries are computed per calendar
+date rather than by adding 24h, so a DST zone still lands on local 20:00 (and
+correctly yields a 23h or 25h window on the transition day).
+
+The checkpoint only advances after **every segment on every configured channel**
+has been delivered, and processing stops at the first failure rather than
+skipping ahead. Two consequences worth knowing:
+
+- Delivery is **at-least-once**, not exactly-once. If segment 3 of 5 fails, the
+  whole window is resent on retry. A duplicate is recoverable; a gap is not.
+- A permanently broken channel stalls the checkpoint and keeps retrying, by
+  design — advancing past undelivered data would lose it silently. After three
+  consecutive failures the log names the channel; fix it, or drop it from
+  `DRESERVE_DAILY_CHANNELS` / `DRESERVE_NOTIFY_CHANNELS`.
+
+On a first run with no checkpoint only the most recent complete window is sent,
+so existing history does not arrive as a dozen messages.
+`DRESERVE_DAILY_MAX_BACKFILL` (default 7) caps a long catch-up; skipped periods
+are named in the first message. Long digests are split at line boundaries, never
+mid-line, into `(1/n)` messages.
+
 ### Output
 
 ```
@@ -132,6 +176,7 @@ data/d-reserve-jp/
   events-YYYYMM.jsonl   only cells that changed — the history that matters
   polls.jsonl           one line per poll, including failures
   report-<stamp>.json   saved by --report
+  daily-summary-state.json  digest checkpoint: last fully delivered window
   raw/<stamp>.json.gz   raw responses, only when DRESERVE_KEEP_RAW=true
 ```
 
@@ -185,6 +230,23 @@ argument pointing at the repo's `.env`.
 
 For resident mode instead, drop `StartInterval`, add `KeepAlive`, and append
 `--interval` / `5m` to `ProgramArguments`.
+
+### The 20:00 daily digest
+
+A second job sends the digest, running alongside the polling job:
+
+```bash
+cp crawlers/d-reserve-jp/launchd/jp.d-reserve.daily.plist.example \
+   ~/Library/LaunchAgents/jp.d-reserve.daily.plist
+# edit the paths inside, then:
+launchctl load ~/Library/LaunchAgents/jp.d-reserve.daily.plist
+```
+
+`StartCalendarInterval` follows the **system** timezone. If the machine is not
+set to `DRESERVE_DAILY_TZ` the job fires at a different moment, but the window
+comes from the checkpoint rather than the launch time, so the content stays
+correct and anything missed is backfilled on the next run. The same holds when
+the Mac is asleep at 20:00.
 
 ## Request volume
 
