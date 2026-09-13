@@ -153,8 +153,8 @@ test('grouped mode sends one payload covering every match', () => {
   const [payload, ...rest] = buildPayloads(cells, config);
   assert.equal(rest.length, 0);
   assert.equal(payload.matches.length, 2);
-  assert.match(payload.title, /ほか1件/);
-  assert.match(payload.text, /2026-10-09 \(Fri\)/);
+  assert.match(payload.title, /另 1 筆/);
+  assert.match(payload.text, /2026-10-09 \(五\)/);
   assert.match(payload.text, /https:\/\/example\.com\/book/);
   assert.equal(payload.source, 'd-reserve-jp');
 });

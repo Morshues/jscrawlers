@@ -9,13 +9,13 @@
  */
 
 const DOW_SHORT = {
-  MONDAY: 'Mon',
-  TUESDAY: 'Tue',
-  WEDNESDAY: 'Wed',
-  THURSDAY: 'Thu',
-  FRIDAY: 'Fri',
-  SATURDAY: 'Sat',
-  SUNDAY: 'Sun',
+  MONDAY: '一',
+  TUESDAY: '二',
+  WEDNESDAY: '三',
+  THURSDAY: '四',
+  FRIDAY: '五',
+  SATURDAY: '六',
+  SUNDAY: '日',
 };
 
 /**
@@ -82,7 +82,7 @@ export function selectNotifications(cells, config, notified = {}, { now = Date.n
 }
 
 function formatPrice(value) {
-  return value === null ? '価格不明' : `¥${value.toLocaleString('ja-JP')}`;
+  return value === null ? '價格不明' : `¥${value.toLocaleString('zh-TW')}`;
 }
 
 function describe(cell) {
@@ -90,9 +90,9 @@ function describe(cell) {
   const price = formatPrice(cell.memberPrice);
   const regular =
     cell.regularPrice !== null && cell.regularPrice !== cell.memberPrice
-      ? ` (一般 ${formatPrice(cell.regularPrice)})`
+      ? `（一般價 ${formatPrice(cell.regularPrice)}）`
       : '';
-  return `${cell.salesDate} (${dow})  ${cell.roomName}  残${cell.stockNum}  ${price}${regular}`;
+  return `${cell.salesDate} (${dow})  ${cell.roomName}  剩${cell.stockNum}  ${price}${regular}`;
 }
 
 /**
@@ -107,16 +107,16 @@ export function buildPayload(cells, config, { detectedAt = new Date().toISOStrin
     (a, b) => a.salesDate.localeCompare(b.salesDate) || a.roomName.localeCompare(b.roomName),
   );
   const first = sorted[0];
-  const more = sorted.length > 1 ? ` ほか${sorted.length - 1}件` : '';
+  const more = sorted.length > 1 ? ` 另 ${sorted.length - 1} 筆` : '';
 
-  const lines = sorted.map((cell) => `・${describe(cell)}`);
-  if (config.notify.bookingUrl) lines.push('', `予約: ${config.notify.bookingUrl}`);
+  const lines = sorted.map((cell) => `• ${describe(cell)}`);
+  if (config.notify.bookingUrl) lines.push('', `訂房：${config.notify.bookingUrl}`);
 
   return {
     source: 'd-reserve-jp',
     event: 'availability',
     hotelCode: config.hotelCode,
-    title: `空室あり: ${first.roomName} ${first.salesDate}${more}`,
+    title: `有空房：${first.roomName} ${first.salesDate}${more}`,
     text: lines.join('\n'),
     bookingUrl: config.notify.bookingUrl || null,
     detectedAt,

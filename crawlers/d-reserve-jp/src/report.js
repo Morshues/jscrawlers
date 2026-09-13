@@ -296,7 +296,7 @@ export function formatReport(report, config, state) {
   out.push(`目前可訂  ${availableNow.length} 筆${availableNow.length ? '：' : ''}`);
   for (const cell of availableNow.slice(0, 20)) {
     out.push(
-      `  ${cell.salesDate}  ${cell.roomName}  残${cell.stockNum}  ¥${cell.memberPrice?.toLocaleString('ja-JP') ?? '?'}`,
+      `  ${cell.salesDate}  ${cell.roomName}  剩${cell.stockNum}  ¥${cell.memberPrice?.toLocaleString('zh-TW') ?? '?'}`,
     );
   }
 

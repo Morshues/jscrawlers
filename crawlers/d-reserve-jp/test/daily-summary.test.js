@@ -318,7 +318,7 @@ test('a quiet window still reports coverage', () => {
   const summary = summarizeWindow({ events: [], polls: [] }, WINDOW, configWith());
   const text = formatSummary(summary);
   assert.match(text, /2026-09-09 20:00 → 2026-09-10 20:00 \(Asia\/Taipei\)/);
-  assert.match(text, /本期間に変化はありませんでした/);
+  assert.match(text, /本期間無任何變化/);
 });
 
 test('the summary renders the timeline and the closing state', () => {
@@ -332,9 +332,9 @@ test('the summary renders the timeline and the closing state', () => {
   ];
   const text = formatSummary(summarizeWindow({ events, polls: [] }, WINDOW, configWith()));
   assert.match(text, /■ 2026-11-14 露天風呂付特別室/);
-  assert.match(text, /21:00 空室 残1 ¥110,000/);
-  assert.match(text, /22:00 価格 ¥110,000 → ¥118,800/);
-  assert.match(text, /締切時: 空室 残1 ¥118,800/);
+  assert.match(text, /21:00 釋出 剩1 ¥110,000/);
+  assert.match(text, /22:00 價格 ¥110,000 → ¥118,800/);
+  assert.match(text, /截止時：可訂 剩1 ¥118,800/);
 });
 
 test('splitMessage keeps short text whole', () => {
@@ -390,9 +390,9 @@ test('a single-segment digest is not numbered', () => {
 test('the skip notice rides on the first message only', () => {
   const summary = summarizeWindow({ events: [], polls: [] }, WINDOW, configWith());
   const withNote = buildSummaryPayloads(summary, configWith(), {
-    skippedNote: '※ 3 期分をスキップ',
+    skippedNote: '※ 已跳過 3 期',
   });
-  assert.match(withNote[0].text, /※ 3 期分をスキップ/);
+  assert.match(withNote[0].text, /※ 已跳過 3 期/);
   const without = buildSummaryPayloads(summary, configWith());
-  assert.doesNotMatch(without[0].text, /スキップ/);
+  assert.doesNotMatch(without[0].text, /跳過/);
 });

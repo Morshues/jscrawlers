@@ -147,16 +147,16 @@ export function pendingWindows({ lastWindowEnd, now, timeZone, hour, maxBackfill
 }
 
 const KIND_LABEL = {
-  appear: '空室',
-  disappear: '満室',
-  stock: '在庫',
-  price: '価格',
-  room_added: '追加',
-  room_removed: '削除',
+  appear: '釋出',
+  disappear: '售罄',
+  stock: '庫存',
+  price: '價格',
+  room_added: '新增',
+  room_removed: '移除',
 };
 
 function yen(value) {
-  return value === null || value === undefined ? '?' : `¥${value.toLocaleString('ja-JP')}`;
+  return value === null || value === undefined ? '?' : `¥${value.toLocaleString('zh-TW')}`;
 }
 
 /**
@@ -265,12 +265,12 @@ function findWindowGaps(okPolls, intervalMs) {
 
 function humanMs(ms) {
   const minutes = Math.round(ms / 60_000);
-  if (minutes < 60) return `${minutes}分`;
+  if (minutes < 60) return `${minutes} 分鐘`;
   const hours = Math.floor(minutes / 60);
-  return `${hours}時間${minutes % 60 ? `${minutes % 60}分` : ''}`;
+  return `${hours} 小時${minutes % 60 ? ` ${minutes % 60} 分鐘` : ''}`;
 }
 
-/** One line describing what changed, e.g. "05:12 空室 残1 ¥110,000". */
+/** One line describing what changed, e.g. "05:12 釋出 剩1 ¥110,000". */
 function describeEvent(event, timeZone) {
   const at = localTime(Date.parse(event.ts), timeZone);
   const label = KIND_LABEL[event.kind] ?? event.kind;
@@ -279,12 +279,12 @@ function describeEvent(event, timeZone) {
     return `${at} ${label} ${yen(event.from?.memberPrice)} → ${yen(event.to?.memberPrice)}`;
   }
   if (event.kind === 'stock') {
-    return `${at} ${label} 残${event.from?.stockNum} → 残${event.to?.stockNum}`;
+    return `${at} ${label} 剩${event.from?.stockNum} → 剩${event.to?.stockNum}`;
   }
   if (event.kind === 'disappear' || event.kind === 'room_removed') {
     return `${at} ${label}`;
   }
-  return `${at} ${label} 残${event.to?.stockNum ?? '?'} ${yen(event.to?.memberPrice)}`;
+  return `${at} ${label} 剩${event.to?.stockNum ?? '?'} ${yen(event.to?.memberPrice)}`;
 }
 
 /**
@@ -304,7 +304,7 @@ export function formatSummary(summary, { skippedNote } = {}) {
   out.push(`${summary.window.startDate} ${startAt} → ${summary.window.endDate} ${endAt} (${tz})`);
 
   const { coverage } = summary;
-  out.push(`輪詢 ${coverage.ok}/${coverage.expected} 成功、失敗 ${coverage.failed}`);
+  out.push(`輪詢 ${coverage.ok}/${coverage.expected} 成功，失敗 ${coverage.failed}`);
   if (coverage.gaps.length > 0) {
     out.push(`⚠ 觀測中斷 ${coverage.gaps.length} 段（最長 ${humanMs(coverage.gaps[0].ms)}）`);
     for (const gap of coverage.gaps.slice(0, 3)) {
@@ -315,35 +315,34 @@ export function formatSummary(summary, { skippedNote } = {}) {
     out.push('   中斷期間的「無變化」不可信。');
   }
 
-  if (summary.seeded > 0)
-    out.push(`基準建立 ${summary.seeded} 筆（初回のため変化としては数えません）`);
+  if (summary.seeded > 0) out.push(`建立基準 ${summary.seeded} 筆（首次執行，不計為變化）`);
 
   const total = Object.values(summary.counts).reduce((a, b) => a + b, 0);
   out.push('');
 
   if (total === 0) {
-    out.push('本期間に変化はありませんでした。');
+    out.push('本期間無任何變化。');
   } else {
     const parts = Object.entries(summary.counts).map(
       ([kind, n]) => `${KIND_LABEL[kind] ?? kind} ${n}`,
     );
-    out.push(`変化 ${total} 件（${parts.join(' / ')}）`);
+    out.push(`變化 ${total} 筆（${parts.join('、')}）`);
     out.push('');
 
     for (const cell of summary.cells) {
       const last = cell.events.at(-1);
       const finalState = last.to
-        ? `${last.to.available ? '空室' : '満室'} 残${last.to.stockNum} ${yen(last.to.memberPrice)}`
-        : '削除';
+        ? `${last.to.available ? '可訂' : '已滿'} 剩${last.to.stockNum} ${yen(last.to.memberPrice)}`
+        : '已移除';
       out.push(`■ ${cell.salesDate} ${cell.roomName}`);
       for (const event of cell.events) out.push(`   ${describeEvent(event, tz)}`);
-      out.push(`   → 締切時: ${finalState}`);
+      out.push(`   → 截止時：${finalState}`);
     }
   }
 
   if (summary.availableAtEnd !== null) {
     out.push('');
-    out.push(`締切時の予約可能: ${summary.availableAtEnd} 件`);
+    out.push(`截止時可訂：${summary.availableAtEnd} 筆`);
   }
 
   return out.join('\n');

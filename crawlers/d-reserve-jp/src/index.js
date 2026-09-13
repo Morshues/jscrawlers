@@ -112,7 +112,7 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
   if (dryRun) {
     log.info(`[dry-run] ${matches.length} cells match the watch filter, ${fresh.length} are new`);
     for (const cell of matches)
-      log.info(`  match: ${cell.salesDate} ${cell.roomName} 残${cell.stockNum}`);
+      log.info(`  match: ${cell.salesDate} ${cell.roomName} 剩${cell.stockNum}`);
     for (const payload of buildPayloads(fresh, config))
       log.info(`[dry-run] would notify:\n${payload.text}`);
     return { snapshot, events, matches, fresh, notified: false };
@@ -161,7 +161,7 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
   if (seeding && !config.notify.onFirstRun) {
     if (fresh.length > 0) {
       log.info(`baseline established; ${fresh.length} cell(s) already bookable (not alerted):`);
-      for (const cell of fresh) log.info(`  ${cell.salesDate} ${cell.roomName} 残${cell.stockNum}`);
+      for (const cell of fresh) log.info(`  ${cell.salesDate} ${cell.roomName} 剩${cell.stockNum}`);
       log.info('set DRESERVE_NOTIFY_ON_FIRST_RUN=true to be alerted about these too');
     }
     return { snapshot, events, matches, fresh, notified: false };
@@ -170,7 +170,7 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
   // A notification failure must never abort the run: the history is the part we
   // cannot reconstruct later, and it is already safely on disk by this point.
   for (const payload of buildPayloads(fresh, config, { detectedAt: snapshot.fetchedAt })) {
-    log.warn(`空室検知: ${payload.title}`);
+    log.warn(`偵測到空房：${payload.title}`);
     await notify(payload, { signal });
   }
 
@@ -226,7 +226,7 @@ async function runDailySummary({ config, log, signal, notify, dryRun }) {
     // Only the first message of the batch carries the skip notice.
     const skippedNote =
       index === 0 && skipped.length > 0
-        ? `※ ${skipped.length} 期分をスキップしました（${skipped[0].startDate} → ${skipped.at(-1).endDate}）`
+        ? `※ 已跳過 ${skipped.length} 期（${skipped[0].startDate} → ${skipped.at(-1).endDate}）`
         : undefined;
     const payloads = buildSummaryPayloads(summary, config, { skippedNote });
 
@@ -329,8 +329,8 @@ await runCrawler(NAME, async ({ log, signal }) => {
       source: NAME,
       event: 'test',
       hotelCode: config.hotelCode,
-      title: `[test] d-reserve-jp 通知テスト`,
-      text: `通知チャンネルの疎通確認です。\nhotel: ${config.hotelCode}\n${config.notify.bookingUrl || ''}`.trim(),
+      title: `[測試] d-reserve-jp 通知測試`,
+      text: `通知管道連線測試。\n旅館代碼：${config.hotelCode}\n${config.notify.bookingUrl || ''}`.trim(),
       bookingUrl: config.notify.bookingUrl || null,
       detectedAt: new Date().toISOString(),
       matches: [],
