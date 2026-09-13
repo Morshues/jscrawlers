@@ -1,3 +1,5 @@
+import { selectFresh } from '@jscrawlers/core';
+
 /**
  * Decide which currently-bookable cells are worth waking someone up for, and
  * turn them into a notification payload.
@@ -48,37 +50,19 @@ export function matchesWatch(cell, watch) {
  * @returns {{ matches: object[], fresh: object[], notified: object }}
  */
 export function selectNotifications(cells, config, notified = {}, { now = Date.now() } = {}) {
-  const { watch, notify } = config;
-  const matches = [];
-  const fresh = [];
-  const next = {};
+  const matching = Object.entries(cells).filter(([, cell]) => matchesWatch(cell, config.watch));
+  const { fresh, notified: next } = selectFresh(
+    matching.map(([key]) => key),
+    notified,
+    { cooldownMs: config.notify.cooldownMs, now },
+  );
+  const byKey = new Map(matching);
 
-  for (const [key, cell] of Object.entries(cells)) {
-    if (!matchesWatch(cell, watch)) continue;
-    matches.push(cell);
-
-    const previous = notified[key];
-    if (!previous) {
-      // Rising edge: the cell was not bookable (or not matching) last poll.
-      fresh.push(cell);
-      next[key] = { lastNotifiedAt: new Date(now).toISOString() };
-      continue;
-    }
-
-    const age = now - Date.parse(previous.lastNotifiedAt);
-    if (notify.cooldownMs > 0 && age >= notify.cooldownMs) {
-      fresh.push(cell);
-      next[key] = { lastNotifiedAt: new Date(now).toISOString() };
-    } else {
-      // Still open and still inside the cooldown: carry the timestamp forward
-      // so the reminder clock keeps running from the original alert.
-      next[key] = previous;
-    }
-  }
-
-  // Keys absent from `next` have stopped matching; dropping them is what lets a
-  // future re-opening count as a fresh edge again.
-  return { matches, fresh, notified: next };
+  return {
+    matches: matching.map(([, cell]) => cell),
+    fresh: fresh.map((key) => byKey.get(key)),
+    notified: next,
+  };
 }
 
 function formatPrice(value) {

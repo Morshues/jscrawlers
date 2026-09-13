@@ -50,3 +50,32 @@ export async function withConcurrency(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, list.length) }, worker));
   return results;
 }
+
+/**
+ * "5m" / "90s" / "2h" / "300000" -> milliseconds.
+ * A bare number is treated as milliseconds so raw values keep working.
+ */
+export function parseDuration(value, key = 'duration') {
+  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/.exec(String(value).trim());
+  if (!match)
+    throw new Error(`${key} must look like 5m, 90s, 2h or a number of ms, got "${value}"`);
+  const units = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+  return Number(match[1]) * units[match[2] ?? 'ms'];
+}
+
+/**
+ * Sleep that wakes immediately on abort. A plain sleep would keep the process
+ * alive for up to a full interval after Ctrl-C, which feels like a hang.
+ */
+export function sleepUntilAborted(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+    signal.addEventListener('abort', done, { once: true });
+  });
+}

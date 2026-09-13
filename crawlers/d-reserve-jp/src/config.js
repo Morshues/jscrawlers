@@ -1,3 +1,5 @@
+import { createEnvReader, parseDuration } from '@jscrawlers/core';
+
 /**
  * Every knob this crawler has, read from the environment.
  *
@@ -11,56 +13,15 @@ export const MAX_MONTHS_PER_REQUEST = 2;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function required(env, key) {
-  const value = env[key]?.trim();
-  if (!value) throw new Error(`${key} is required — copy .env.example to .env and fill it in`);
-  return value;
-}
-
-function optional(env, key, fallback = '') {
-  const value = env[key]?.trim();
-  return value === undefined || value === '' ? fallback : value;
-}
-
-function bool(env, key, fallback) {
-  const value = optional(env, key);
-  if (value === '') return fallback;
-  return value === 'true' || value === '1' || value === 'yes';
-}
-
-function number(env, key, fallback) {
-  const value = optional(env, key);
-  if (value === '') return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) throw new Error(`${key} must be a number, got "${value}"`);
-  return parsed;
-}
-
-/** Comma-separated list -> trimmed non-empty entries. */
-function list(env, key) {
-  return optional(env, key)
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
+// Re-exported because index.js and the tests reach for it here, and `--interval`
+// is a crawler-level flag rather than a core concern.
+export { parseDuration };
 
 function assertDate(value, key) {
   if (!DATE_RE.test(value) || Number.isNaN(Date.parse(`${value}T00:00:00Z`))) {
     throw new Error(`${key} must be a YYYY-MM-DD date, got "${value}"`);
   }
   return value;
-}
-
-/**
- * "5m" / "90s" / "2h" / "300000" -> milliseconds.
- * A bare number is treated as milliseconds so raw values keep working.
- */
-export function parseDuration(value, key = 'duration') {
-  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)?$/.exec(String(value).trim());
-  if (!match)
-    throw new Error(`${key} must look like 5m, 90s, 2h or a number of ms, got "${value}"`);
-  const units = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-  return Number(match[1]) * units[match[2] ?? 'ms'];
 }
 
 /** Inclusive list of every YYYY-MM between two dates: ['202609', '202610', ...]. */
@@ -127,17 +88,6 @@ export function addDays(date, days) {
   return stamp.toISOString().slice(0, 10);
 }
 
-/** Reject a mistyped IANA zone at startup rather than at 20:00 three days later. */
-function timeZone(env, key, fallback) {
-  const value = optional(env, key, fallback);
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: value });
-  } catch {
-    throw new Error(`${key} is not a valid IANA time zone, got "${value}"`);
-  }
-  return value;
-}
-
 const DAYS_OF_WEEK = new Set([
   'MONDAY',
   'TUESDAY',
@@ -156,75 +106,72 @@ const DAYS_OF_WEEK = new Set([
  * @param {Record<string, string | undefined>} [env]
  */
 export function loadConfig(env = process.env) {
-  const fromDate = assertDate(required(env, 'DRESERVE_FROM_DATE'), 'DRESERVE_FROM_DATE');
-  const toDate = assertDate(required(env, 'DRESERVE_TO_DATE'), 'DRESERVE_TO_DATE');
+  const read = createEnvReader(env);
+
+  const fromDate = assertDate(read.required('DRESERVE_FROM_DATE'), 'DRESERVE_FROM_DATE');
+  const toDate = assertDate(read.required('DRESERVE_TO_DATE'), 'DRESERVE_TO_DATE');
   if (toDate < fromDate) throw new Error('DRESERVE_TO_DATE is before DRESERVE_FROM_DATE');
 
-  const daysOfWeek = list(env, 'DRESERVE_WATCH_DAYS_OF_WEEK').map((day) => day.toUpperCase());
+  const daysOfWeek = read.list('DRESERVE_WATCH_DAYS_OF_WEEK').map((day) => day.toUpperCase());
   for (const day of daysOfWeek) {
     if (!DAYS_OF_WEEK.has(day)) {
       throw new Error(`DRESERVE_WATCH_DAYS_OF_WEEK has an unknown day "${day}"`);
     }
   }
 
-  const maxPrice = optional(env, 'DRESERVE_WATCH_MAX_PRICE');
-
-  const dailyHour = number(env, 'DRESERVE_DAILY_HOUR', 20);
-  if (!Number.isInteger(dailyHour) || dailyHour < 0 || dailyHour > 23) {
-    throw new Error(`DRESERVE_DAILY_HOUR must be an integer 0-23, got "${dailyHour}"`);
-  }
+  const maxPrice = read.optional('DRESERVE_WATCH_MAX_PRICE');
 
   return {
-    apiBase: optional(env, 'DRESERVE_API_BASE', 'https://d-reserve.jp'),
-    hotelCode: required(env, 'DRESERVE_HOTEL_CODE'),
+    apiBase: read.optional('DRESERVE_API_BASE', 'https://d-reserve.jp'),
+    hotelCode: read.required('DRESERVE_HOTEL_CODE'),
     fromDate,
     toDate,
     windows: monthWindows(fromDate, toDate),
 
     query: {
-      lodgerCode: optional(env, 'DRESERVE_LODGER_CODE', '0_1_2_3_4_6'),
-      lodgerNum: optional(env, 'DRESERVE_LODGER_NUM', '2_0_0_0_0_0'),
-      stays: optional(env, 'DRESERVE_STAYS', '1'),
-      onlyAllLanguagesPlan: bool(env, 'DRESERVE_ONLY_ALL_LANGUAGES_PLAN', false),
-      onlyAllRankPlan: bool(env, 'DRESERVE_ONLY_ALL_RANK_PLAN', false),
+      lodgerCode: read.optional('DRESERVE_LODGER_CODE', '0_1_2_3_4_6'),
+      lodgerNum: read.optional('DRESERVE_LODGER_NUM', '2_0_0_0_0_0'),
+      stays: read.optional('DRESERVE_STAYS', '1'),
+      onlyAllLanguagesPlan: read.bool('DRESERVE_ONLY_ALL_LANGUAGES_PLAN', false),
+      onlyAllRankPlan: read.bool('DRESERVE_ONLY_ALL_RANK_PLAN', false),
     },
 
     poll: {
-      intervalMs: parseDuration(optional(env, 'DRESERVE_INTERVAL', '5m'), 'DRESERVE_INTERVAL'),
-      requestDelayMs: number(env, 'DRESERVE_REQUEST_DELAY_MS', 1500),
-      keepRaw: bool(env, 'DRESERVE_KEEP_RAW', false),
-      rawKeep: number(env, 'DRESERVE_RAW_KEEP', 48),
+      intervalMs: read.duration('DRESERVE_INTERVAL', '5m'),
+      requestDelayMs: read.number('DRESERVE_REQUEST_DELAY_MS', 1500),
+      keepRaw: read.bool('DRESERVE_KEEP_RAW', false),
+      rawKeep: read.number('DRESERVE_RAW_KEEP', 48),
     },
 
     // Every field is optional; an empty one simply does not narrow the match.
     watch: {
-      dates: parseDateSpec(optional(env, 'DRESERVE_WATCH_DATES')),
-      roomCodes: new Set(list(env, 'DRESERVE_WATCH_ROOM_CODES')),
-      roomName: optional(env, 'DRESERVE_WATCH_ROOM_NAME'),
+      dates: parseDateSpec(read.optional('DRESERVE_WATCH_DATES')),
+      roomCodes: new Set(read.list('DRESERVE_WATCH_ROOM_CODES')),
+      roomName: read.optional('DRESERVE_WATCH_ROOM_NAME'),
       daysOfWeek: new Set(daysOfWeek),
-      maxPrice: maxPrice === '' ? null : number(env, 'DRESERVE_WATCH_MAX_PRICE'),
-      minStock: number(env, 'DRESERVE_WATCH_MIN_STOCK', 1),
+      maxPrice: maxPrice === '' ? null : read.number('DRESERVE_WATCH_MAX_PRICE'),
+      minStock: read.number('DRESERVE_WATCH_MIN_STOCK', 1),
     },
 
     notify: {
-      channels: list(env, 'DRESERVE_NOTIFY_CHANNELS'),
-      cooldownMs: number(env, 'DRESERVE_NOTIFY_COOLDOWN_MIN', 0) * 60_000,
-      grouped: bool(env, 'DRESERVE_NOTIFY_GROUPED', true),
-      onFirstRun: bool(env, 'DRESERVE_NOTIFY_ON_FIRST_RUN', false),
-      bookingUrl: optional(env, 'DRESERVE_BOOKING_URL'),
+      channels: read.list('DRESERVE_NOTIFY_CHANNELS'),
+      cooldownMs: read.number('DRESERVE_NOTIFY_COOLDOWN_MIN', 0) * 60_000,
+      grouped: read.bool('DRESERVE_NOTIFY_GROUPED', true),
+      onFirstRun: read.bool('DRESERVE_NOTIFY_ON_FIRST_RUN', false),
+      bookingUrl: read.optional('DRESERVE_BOOKING_URL'),
     },
 
     // The daily digest is deliberately independent of the watch filter: the
     // immediate alerts narrow to the date being booked, the digest is how the
     // release pattern across every date becomes visible.
     daily: {
-      timeZone: timeZone(env, 'DRESERVE_DAILY_TZ', 'Asia/Taipei'),
-      hour: dailyHour,
-      channels: list(env, 'DRESERVE_DAILY_CHANNELS'),
-      maxBackfill: number(env, 'DRESERVE_DAILY_MAX_BACKFILL', 7),
-      maxChars: number(env, 'DRESERVE_DAILY_MAX_CHARS', 3500),
+      timeZone: read.timeZone('DRESERVE_DAILY_TZ', 'Asia/Taipei'),
+      hour: read.integer('DRESERVE_DAILY_HOUR', 20, { min: 0, max: 23 }),
+      channels: read.list('DRESERVE_DAILY_CHANNELS'),
+      maxBackfill: read.number('DRESERVE_DAILY_MAX_BACKFILL', 7),
+      maxChars: read.number('DRESERVE_DAILY_MAX_CHARS', 3500),
     },
 
-    reportTz: optional(env, 'DRESERVE_REPORT_TZ', 'Asia/Tokyo'),
+    reportTz: read.optional('DRESERVE_REPORT_TZ', 'Asia/Tokyo'),
   };
 }

@@ -9,6 +9,7 @@ import {
   readJson,
   outputDir,
   createNotifier,
+  pollLoop,
 } from '@jscrawlers/core';
 
 import { loadConfig, parseDuration } from './config.js';
@@ -30,22 +31,6 @@ const { values } = parseArgs({
   'notify-test': { type: 'boolean', default: false },
   'daily-summary': { type: 'boolean', default: false },
 });
-
-/**
- * Sleep that wakes immediately on Ctrl-C. A plain sleep would keep the process
- * alive for up to a full interval after the signal, which feels like a hang.
- */
-function sleepUntilAborted(ms, signal) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', done);
-      resolve();
-    }
-    signal.addEventListener('abort', done, { once: true });
-  });
-}
 
 /** Events are sharded by month so no single file grows without bound. */
 function eventsFile(ts) {
@@ -355,16 +340,10 @@ await runCrawler(NAME, async ({ log, signal }) => {
 
   // Resident mode. A single failed poll must not end the watch — the next one
   // may well be the release we are waiting for.
-  log.info(`polling every ${Math.round(intervalMs / 1000)}s — Ctrl-C to stop`);
-  while (!signal.aborted) {
-    try {
-      await pollOnce({ config, log, signal, notify, dryRun });
-    } catch (error) {
-      if (signal.aborted) break;
-      log.error(`poll failed: ${error.message}`);
-    }
-    if (signal.aborted) break;
-    await sleepUntilAborted(intervalMs, signal);
-  }
-  return undefined;
+  return pollLoop({
+    task: () => pollOnce({ config, log, signal, notify, dryRun }),
+    intervalMs,
+    signal,
+    logger: log,
+  });
 });
