@@ -1,3 +1,6 @@
 node_modules/
 data/
 package-lock.json
+
+# Captured HTML samples — must stay byte-faithful to what the site actually serves
+crawlers/*/test/fixtures/

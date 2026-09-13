@@ -6,11 +6,12 @@ A Node.js crawler monorepo. One folder per crawler, all sharing `@jscrawlers/cor
 
 ```
 crawlers/            each subfolder = one crawler (npm workspace)
-  d-reserve-jp/
+  d-reserve-jp/      d-reserve.jp room availability watcher
+  buy-gamer-tw/      巴哈商城 restock watcher
     src/index.js     entry point
     package.json     that crawler's own dependencies
 packages/
-  core/              shared: logger / HTTP retry / throttling / output
+  core/              shared: logger / HTTP retry / throttling / output / notify
 scripts/
   run.mjs            npm run crawl <name>
   new-crawler.mjs    npm run new <name>
@@ -29,7 +30,7 @@ cp .env.example .env
 
 | Command                             | What it does                                       |
 | ----------------------------------- | -------------------------------------------------- |
-| `npm run crawl <name>`              | Run one crawler, e.g. `npm run crawl d-reserve-jp` |
+| `npm run crawl <name>`              | Run one crawler, e.g. `npm run crawl buy-gamer-tw` |
 | `npm run crawl <name> -- --pages 3` | Pass arguments through to the crawler              |
 | `npm run new <name>`                | Scaffold a new crawler (kebab-case name)           |
 | `npm test`                          | Run the tests (built-in `node:test`)               |
@@ -90,6 +91,16 @@ thrown error into exit code 1.
 - `saveJson` / `saveJsonl` / `appendJsonl` / `readJson` / `outputDir` — write to
   `data/<crawler>/`; `{stamp}` in a filename becomes a UTC timestamp
 - `parseArgs(options)` — a thin wrapper over `node:util` for crawler CLI flags
+- `createEnvReader(env)` — typed `.env` readers (`required` / `optional` /
+  `bool` / `number` / `integer` / `list` / `timeZone` / `duration`) that fail
+  with the name of the variable to fix
+- `parseDuration('5m')` / `sleepUntilAborted(ms, signal)` — durations, and a
+  sleep that wakes on Ctrl-C instead of hanging out the interval
+- `pollLoop({ task, intervalMs, signal, logger })` — resident polling; one
+  failed cycle is logged, never fatal
+- `selectFresh(keys, notified, { cooldownMs })` — edge-triggered alert
+  bookkeeping: announce on the rising edge, stay quiet while it holds, optional
+  cooldown for a repeat nudge
 - `createNotifier({ channels })` — push a payload to `webhook` / `telegram` /
   `command` (JSON on stdin) channels; each is independent and `notify()` never
   throws, so a broken channel cannot take a crawler down

@@ -1,0 +1,14 @@
+{
+  "name": "@jscrawlers/buy-gamer-tw",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "巴哈姆特商城補貨監看 — 定時輪詢商品頁，從售罄變成可下單時發通知",
+  "main": "./src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env src/index.js"
+  },
+  "dependencies": {
+    "@jscrawlers/core": "*"
+  }
+}
