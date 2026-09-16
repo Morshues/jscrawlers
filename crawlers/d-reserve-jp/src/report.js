@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { outputDir } from '@jscrawlers/core';
+import { listingShift } from './diff.js';
 
 /**
  * Offline analysis of the history this crawler accumulates. Reads only local
@@ -162,7 +163,11 @@ export function buildReport({ events, polls }, config, { sinceMs = null, now = D
   const { spans, stillOpen } = survivalTimes(scopedEvents);
   const durations = spans.map((span) => span.ms);
 
-  const priceChanges = scopedEvents.filter((event) => event.kind === 'price');
+  // A plan vanishing is filed as a price change to null; counting it here would
+  // report a dozen "price moves" a day that are really dates closing for booking.
+  const priceChanges = scopedEvents.filter(
+    (event) => event.kind === 'price' && listingShift(event) === null,
+  );
   const priceByRoom = new Map();
   for (const event of priceChanges) {
     const entry = priceByRoom.get(event.roomCode) ?? {

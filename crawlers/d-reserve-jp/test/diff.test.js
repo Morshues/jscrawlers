@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { diffSnapshots } from '../src/diff.js';
+import { diffSnapshots, listingShift, offSale } from '../src/diff.js';
 
 /** One cell, shaped like api.js normalize() output. */
 function cell(overrides = {}) {
@@ -100,4 +100,48 @@ test('a null price on a past date does not crash or churn', () => {
     stockStatus: 'NO_SALE',
   });
   assert.deepEqual(diffSnapshots({ [KEY]: expired }, { [KEY]: expired }), []);
+});
+
+// ── reading a price event that is really the listing closing ────────────────
+
+test('a plan vanishing is a listing shift, not a price move', () => {
+  const [event] = diffSnapshots(
+    { [KEY]: cell() },
+    { [KEY]: cell({ memberPrice: null, regularPrice: null, stockStatus: 'NO_SALE' }) },
+  );
+  assert.equal(event.kind, 'price', 'still stored as a price event');
+  assert.equal(listingShift(event), 'off');
+});
+
+test('a plan coming back is the other direction', () => {
+  const [event] = diffSnapshots(
+    { [KEY]: cell({ memberPrice: null, regularPrice: null, stockStatus: 'NO_SALE' }) },
+    { [KEY]: cell() },
+  );
+  assert.equal(listingShift(event), 'on');
+});
+
+test('a genuine price move is not a listing shift', () => {
+  const [event] = diffSnapshots(
+    { [KEY]: cell() },
+    { [KEY]: cell({ memberPrice: 118800, regularPrice: 118800 }) },
+  );
+  assert.equal(listingShift(event), null);
+});
+
+test('only a price event can be a listing shift', () => {
+  const [event] = diffSnapshots(
+    { [KEY]: cell({ available: true, stockNum: 1 }) },
+    { [KEY]: cell() },
+  );
+  assert.equal(event.kind, 'disappear');
+  assert.equal(listingShift(event), null);
+});
+
+test('offSale needs both prices gone', () => {
+  assert.equal(offSale(null), false);
+  assert.equal(offSale({ memberPrice: null, regularPrice: null }), true);
+  assert.equal(offSale({ memberPrice: null, regularPrice: 110000 }), false);
+  // Older rows only ever carried memberPrice.
+  assert.equal(offSale({ memberPrice: null }), true);
 });

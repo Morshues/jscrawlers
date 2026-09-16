@@ -1,4 +1,5 @@
 import { addDays } from './config.js';
+import { listingShift, offSale } from './diff.js';
 
 /**
  * Daily digest of everything the watcher recorded, as pure functions.
@@ -153,7 +154,40 @@ const KIND_LABEL = {
   price: '價格',
   room_added: '新增',
   room_removed: '移除',
+  expire: '訂房截止',
 };
+
+/**
+ * What a stored event means to a reader, or null when it is not news of its own.
+ *
+ * A vanished plan is filed as a `price` change to null, because that is all
+ * diffSnapshots can see. What it actually means depends on the date, read in the
+ * hotel's own timezone:
+ *
+ * - The cell was bookable and is not any more: somebody took the last of it.
+ *   diffSnapshots emits a `disappear` for that in the same poll, which says it
+ *   plainly, so this row is dropped as a duplicate rather than dressed up as a
+ *   withdrawal. SOLD_OUT is the API's own word for it, and settles the one case
+ *   where the check-in date closing could be mistaken for a booking.
+ * - The check-in date has arrived and nothing was bookable: booking closed, for
+ *   every room type at once. That is `expire`, and a `disappear` at the same
+ *   instant is the same event, not a sell-out.
+ * - A future date that was already full: nothing could be booked, so all we can
+ *   honestly say is that no plan is quoted any more. It stays a price event.
+ *
+ * @param {object} event
+ * @param {string} hotelTimeZone config.reportTz — where the hotel's day rolls over
+ * @returns {string|null} the kind to report under, or null to drop the event
+ */
+export function displayKind(event, hotelTimeZone) {
+  if (listingShift(event) !== 'off') return event.kind;
+
+  const dateClosed = event.salesDate <= localDate(Date.parse(event.ts), hotelTimeZone);
+  if (event.from?.available === true) {
+    return dateClosed && event.to?.stockStatus !== 'SOLD_OUT' ? 'expire' : null;
+  }
+  return dateClosed ? 'expire' : event.kind;
+}
 
 function yen(value) {
   return value === null || value === undefined ? '?' : `¥${value.toLocaleString('zh-TW')}`;
@@ -205,11 +239,23 @@ export function summarizeWindow({ events, polls }, window, config) {
 
   // Seed rows are the baseline snapshot, not things that happened; listing all
   // ~938 of them would bury the window's actual news.
-  const changes = windowEvents.filter((event) => event.kind !== 'seed');
-  const seeded = windowEvents.length - changes.length;
+  const seeded = windowEvents.filter((event) => event.kind === 'seed').length;
+  const changes = windowEvents
+    .filter((event) => event.kind !== 'seed')
+    .map((event) => ({ ...event, kind: displayKind(event, config.reportTz) }))
+    .filter((event) => event.kind !== null);
+
+  // A date closing takes its availability with it, so the same instant also
+  // carries a `disappear`. Nothing was booked — that is one piece of news, and
+  // counting it twice would inflate 售罄 every time a date drops off the range.
+  const closingKey = (event) => `${event.roomCode}|${event.salesDate}|${event.ts}`;
+  const closing = new Set(changes.filter((event) => event.kind === 'expire').map(closingKey));
+  const visible = changes.filter(
+    (event) => !(event.kind === 'disappear' && closing.has(closingKey(event))),
+  );
 
   const cells = new Map();
-  for (const event of changes) {
+  for (const event of visible) {
     const key = `${event.roomCode}|${event.salesDate}`;
     const entry = cells.get(key) ?? {
       roomCode: event.roomCode,
@@ -223,7 +269,29 @@ export function summarizeWindow({ events, polls }, window, config) {
   }
 
   const counts = {};
-  for (const event of changes) counts[event.kind] = (counts[event.kind] ?? 0) + 1;
+  for (const event of visible) counts[event.kind] = (counts[event.kind] ?? 0) + 1;
+
+  // Every room type of a date closes in the same poll, so a check-in date simply
+  // arriving would otherwise fill the digest with a dozen identical blocks. Those
+  // cells collapse into one line per date; a cell that did anything else in the
+  // window stays listed, or its timeline would lose its ending.
+  const closures = new Map();
+  const listed = [];
+  for (const cell of cells.values()) {
+    if (!cell.events.every((event) => event.kind === 'expire')) {
+      listed.push(cell);
+      continue;
+    }
+    const group = closures.get(cell.salesDate) ?? {
+      salesDate: cell.salesDate,
+      dayOfWeek: cell.dayOfWeek,
+      firstTs: cell.events[0].ts,
+      rooms: [],
+    };
+    if (cell.events[0].ts < group.firstTs) group.firstTs = cell.events[0].ts;
+    group.rooms.push(cell.roomName);
+    closures.set(cell.salesDate, group);
+  }
 
   const ok = windowPolls.filter((poll) => poll.ok);
   const expected = Math.round((window.end - window.start) / config.poll.intervalMs);
@@ -245,7 +313,14 @@ export function summarizeWindow({ events, polls }, window, config) {
     },
     counts,
     seeded,
-    cells: [...cells.values()].sort(
+    closures: [...closures.values()]
+      .map((group) => ({
+        ...group,
+        rooms: [...group.rooms].sort((a, b) => a.localeCompare(b)),
+        count: group.rooms.length,
+      }))
+      .sort((a, b) => a.salesDate.localeCompare(b.salesDate)),
+    cells: listed.sort(
       (a, b) => a.salesDate.localeCompare(b.salesDate) || a.roomName.localeCompare(b.roomName),
     ),
     availableAtEnd: availabilityAt(events, window.end),
@@ -275,8 +350,13 @@ function describeEvent(event, timeZone) {
   const at = localTime(Date.parse(event.ts), timeZone);
   const label = KIND_LABEL[event.kind] ?? event.kind;
 
+  if (event.kind === 'expire') {
+    return `${at} ${label} ${yen(event.from?.memberPrice)} → 停售`;
+  }
   if (event.kind === 'price') {
-    return `${at} ${label} ${yen(event.from?.memberPrice)} → ${yen(event.to?.memberPrice)}`;
+    // "?" reads as a mystery on either side; the API is simply quoting no plan.
+    const price = (snapshot) => (offSale(snapshot) ? '無方案' : yen(snapshot?.memberPrice));
+    return `${at} ${label} ${price(event.from)} → ${price(event.to)}`;
   }
   if (event.kind === 'stock') {
     return `${at} ${label} 剩${event.from?.stockNum} → 剩${event.to?.stockNum}`;
@@ -285,6 +365,38 @@ function describeEvent(event, timeZone) {
     return `${at} ${label}`;
   }
   return `${at} ${label} 剩${event.to?.stockNum ?? '?'} ${yen(event.to?.memberPrice)}`;
+}
+
+/** The cell's state when the window closed, as its last event left it. */
+function finalState(last) {
+  if (!last.to) return '已移除';
+  if (last.kind === 'expire') return '訂房截止（不可訂）';
+  const state = last.to.available ? '可訂' : '已滿';
+  // With no plan quoted, a trailing "?" only raises a question it cannot answer.
+  if (offSale(last.to)) return `${state} 剩${last.to.stockNum}`;
+  return `${state} 剩${last.to.stockNum} ${yen(last.to.memberPrice)}`;
+}
+
+const ROOM_LIST_MAX = 8;
+const ROOM_LINE_WIDTH = 34;
+
+/** Room names as "、"-joined lines, capped so one closed date stays a few lines. */
+function roomList(rooms) {
+  const shown = rooms.slice(0, ROOM_LIST_MAX);
+  const lines = [];
+  let current = '';
+
+  for (const [index, name] of shown.entries()) {
+    const piece = index === shown.length - 1 ? name : `${name}、`;
+    if (current !== '' && current.length + piece.length > ROOM_LINE_WIDTH) {
+      lines.push(current);
+      current = '';
+    }
+    current += piece;
+  }
+  if (current !== '') lines.push(current);
+  if (rooms.length > shown.length) lines[lines.length - 1] += ` …（共 ${rooms.length} 個）`;
+  return lines;
 }
 
 /**
@@ -329,14 +441,17 @@ export function formatSummary(summary, { skippedNote } = {}) {
     out.push(`變化 ${total} 筆（${parts.join('、')}）`);
     out.push('');
 
+    for (const closure of summary.closures) {
+      const at = localTime(Date.parse(closure.firstTs), tz);
+      out.push(`🕛 ${closure.salesDate} 訂房截止（${at} 起 ${closure.count} 個房型下架）`);
+      for (const line of roomList(closure.rooms)) out.push(`   ${line}`);
+    }
+    if (summary.closures.length > 0 && summary.cells.length > 0) out.push('');
+
     for (const cell of summary.cells) {
-      const last = cell.events.at(-1);
-      const finalState = last.to
-        ? `${last.to.available ? '可訂' : '已滿'} 剩${last.to.stockNum} ${yen(last.to.memberPrice)}`
-        : '已移除';
       out.push(`■ ${cell.salesDate} ${cell.roomName}`);
       for (const event of cell.events) out.push(`   ${describeEvent(event, tz)}`);
-      out.push(`   → 截止時：${finalState}`);
+      out.push(`   → 截止時：${finalState(cell.events.at(-1))}`);
     }
   }
 

@@ -105,3 +105,25 @@ export function diffSnapshots(previous, current, { ts = new Date().toISOString()
 
   return events;
 }
+
+/** No plan on offer: the cell cannot be booked at all, its price is not merely unknown. */
+export function offSale(snapshot) {
+  return Boolean(snapshot) && snapshot.memberPrice == null && snapshot.regularPrice == null;
+}
+
+/**
+ * A `price` event that is really the listing closing or reopening.
+ *
+ * The API drops `lowestPlanForMember`/`lowestPlanForRegular` once a date stops
+ * being sellable, so a diff of two snapshots can only see ¥63,800 -> null and
+ * calls it a price change. Readers that care about the difference ask here.
+ *
+ * @returns {'off'|'on'|null} 'off' when the plan vanished, 'on' when it came
+ *   back, null for a genuine price move.
+ */
+export function listingShift(event) {
+  if (event.kind !== 'price') return null;
+  if (offSale(event.to) && !offSale(event.from)) return 'off';
+  if (offSale(event.from) && !offSale(event.to)) return 'on';
+  return null;
+}

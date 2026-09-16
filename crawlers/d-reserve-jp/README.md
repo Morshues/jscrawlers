@@ -162,6 +162,12 @@ skipping ahead. Two consequences worth knowing:
   consecutive failures the log names the channel; fix it, or drop it from
   `DRESERVE_DAILY_CHANNELS` / `DRESERVE_NOTIFY_CHANNELS`.
 
+Once the watched range reaches today, every room type of the current date stops
+being sellable in the same poll. Those collapse into one line per date —
+`🕛 2026-09-16 訂房截止（11:01 起 14 個房型下架）` plus the room names — instead of a
+dozen near-identical blocks. A cell that did anything else that day keeps its own
+timeline instead of joining the group.
+
 On a first run with no checkpoint only the most recent complete window is sent,
 so existing history does not arrive as a dozen messages.
 `DRESERVE_DAILY_MAX_BACKFILL` (default 7) caps a long catch-up; skipped periods
@@ -187,6 +193,13 @@ down" — without it the statistics would quietly lie.
 
 Event kinds: `seed` (baseline, excluded from stats), `appear` (**a release**),
 `disappear`, `stock`, `price`, `room_added`, `room_removed`.
+
+A `price` event whose `to` side quotes no plan at all (both prices `null`) is not
+a price move, so `--report` leaves it out of the price statistics. What it _is_
+depends on the date: the check-in date arriving closes booking (訂房截止), while a
+future date losing its last plan means it was booked — the `disappear` from the
+same poll already says so, and the digest drops the duplicate price row rather
+than calling it a withdrawal.
 
 ## Reading the report
 

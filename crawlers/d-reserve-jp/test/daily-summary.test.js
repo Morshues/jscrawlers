@@ -5,6 +5,7 @@ import {
   availabilityAt,
   boundaryAtOrBefore,
   buildSummaryPayloads,
+  displayKind,
   formatSummary,
   pendingWindows,
   splitMessage,
@@ -395,4 +396,209 @@ test('the skip notice rides on the first message only', () => {
   assert.match(withNote[0].text, /※ 已跳過 3 期/);
   const without = buildSummaryPayloads(summary, configWith());
   assert.doesNotMatch(without[0].text, /跳過/);
+});
+
+// ── a date closing for booking ──────────────────────────────────────────────
+
+/** 2026-09-15 20:00 → 2026-09-16 20:00 Asia/Taipei, the window that exposed this. */
+const SEP16 = {
+  startDate: '2026-09-15',
+  endDate: '2026-09-16',
+  start: at('2026-09-15T12:00:00Z'),
+  end: at('2026-09-16T12:00:00Z'),
+};
+
+/** 11:01 in Taipei, 12:01 in Tokyo — the minute same-day booking closed. */
+const CLOSED_AT = '2026-09-16T03:01:16.804Z';
+
+/** Exactly what the crawler recorded when 2026-09-16 stopped being bookable. */
+const REAL_CLOSURE =
+  '{"ts":"2026-09-16T03:01:16.804Z","kind":"price","roomCode":"RM00010240",' +
+  '"roomName":"次の間タイプ和室","salesDate":"2026-09-16","dayOfWeek":"WEDNESDAY",' +
+  '"from":{"available":false,"stockStatus":"SOLD_OUT","stockNum":0,"memberPrice":63800,' +
+  '"regularPrice":63800},"to":{"available":false,"stockStatus":"NO_SALE","stockNum":0,' +
+  '"memberPrice":null,"regularPrice":null}}';
+
+/** The shape the API leaves behind once a date stops being sellable. */
+function closing(roomName, overrides = {}) {
+  return event(CLOSED_AT, {
+    kind: 'price',
+    roomCode: `RM-${roomName}`,
+    roomName,
+    salesDate: '2026-09-16',
+    from: {
+      available: false,
+      stockStatus: 'SOLD_OUT',
+      stockNum: 0,
+      memberPrice: 63800,
+      regularPrice: 63800,
+    },
+    to: {
+      available: false,
+      stockStatus: 'NO_SALE',
+      stockNum: 0,
+      memberPrice: null,
+      regularPrice: null,
+    },
+    ...overrides,
+  });
+}
+
+test('the row that started this reads as 訂房截止, not a price move', () => {
+  const real = JSON.parse(REAL_CLOSURE);
+  assert.equal(displayKind(real, configWith().reportTz), 'expire');
+
+  const text = formatSummary(summarizeWindow({ events: [real], polls: [] }, SEP16, configWith()));
+  assert.match(text, /🕛 2026-09-16 訂房截止（11:01 起 1 個房型下架）/);
+  assert.match(text, /次の間タイプ和室/);
+  assert.doesNotMatch(text, /價格/, 'the old reading is gone');
+  assert.doesNotMatch(text, /已滿 剩0 \?/);
+});
+
+test('a vanished plan is read by the date it belongs to, in the hotel timezone', () => {
+  const tz = configWith().reportTz;
+  assert.equal(displayKind(closing('和室'), tz), 'expire', 'the check-in date has arrived');
+  assert.equal(
+    displayKind(
+      closing('和室', {
+        salesDate: '2026-10-09',
+        from: { available: true, stockNum: 1, memberPrice: 63800 },
+      }),
+      tz,
+    ),
+    null,
+    'a future date losing its last plan was booked — the disappear says so',
+  );
+  assert.equal(
+    displayKind(closing('和室', { salesDate: '2026-10-09' }), tz),
+    'price',
+    'a future date that was already full: the price is simply unknown now',
+  );
+  assert.equal(
+    displayKind(event('2026-09-16T03:01:00Z'), tz),
+    'appear',
+    'other kinds pass through',
+  );
+});
+
+test('every room type of a closed date collapses into one group', () => {
+  const events = Array.from({ length: 14 }, (_, i) => closing(`房型${i + 1}`));
+  const summary = summarizeWindow({ events, polls: [] }, SEP16, configWith());
+
+  assert.equal(summary.cells.length, 0, 'nothing is listed room by room');
+  assert.equal(summary.closures.length, 1);
+  assert.equal(summary.closures[0].salesDate, '2026-09-16');
+  assert.equal(summary.closures[0].count, 14);
+  assert.deepEqual(summary.counts, { expire: 14 });
+});
+
+test('the disappear that rides along with a closure is not counted as sold out', () => {
+  const events = [
+    closing('和室', { kind: 'disappear' }),
+    closing('和室'), // same cell, same instant
+  ];
+  const summary = summarizeWindow({ events, polls: [] }, SEP16, configWith());
+  assert.deepEqual(summary.counts, { expire: 1 }, 'one piece of news, reported once');
+  assert.equal(summary.closures[0].count, 1);
+});
+
+test('a cell that did something else keeps its timeline and ends with 訂房截止', () => {
+  const events = [
+    event('2026-09-16T01:00:00Z', { salesDate: '2026-09-16', roomName: '和室' }),
+    closing('和室', { roomCode: 'RM00010235' }),
+  ];
+  const text = formatSummary(summarizeWindow({ events, polls: [] }, SEP16, configWith()));
+  assert.match(text, /■ 2026-09-16 和室/);
+  assert.match(text, /09:00 釋出 剩1 ¥110,000/);
+  assert.match(text, /11:01 訂房截止 ¥63,800 → 停售/);
+  assert.match(text, /截止時：訂房截止（不可訂）/);
+  assert.doesNotMatch(text, /已滿 剩0 \?/, 'the old, misleading closing state is gone');
+});
+
+test('a future date losing its last plan is a booking, not a withdrawal', () => {
+  const booked = {
+    salesDate: '2026-10-09',
+    roomCode: 'RM00010235',
+    from: { available: true, stockStatus: 'FEW_STOCK', stockNum: 1, memberPrice: 110000 },
+  };
+  const events = [
+    closing('露天風呂付特別室', { ...booked, kind: 'disappear' }),
+    closing('露天風呂付特別室', booked), // the price row diffSnapshots emits alongside
+  ];
+  const summary = summarizeWindow({ events, polls: [] }, SEP16, configWith());
+  const text = formatSummary(summary);
+
+  assert.deepEqual(summary.counts, { disappear: 1 }, 'reported once, as the sell-out it is');
+  assert.equal(summary.closures.length, 0);
+  assert.match(text, /11:01 售罄/);
+  assert.doesNotMatch(text, /下架/);
+  assert.doesNotMatch(text, /→ \?/, 'the redundant price row is gone');
+  assert.match(text, /截止時：已滿 剩0$/m, 'no price to quote, so none is quoted');
+});
+
+test('a future date that was already full only loses its price', () => {
+  const events = [closing('露天風呂付特別室', { salesDate: '2026-10-09' })];
+  const text = formatSummary(summarizeWindow({ events, polls: [] }, SEP16, configWith()));
+  assert.match(text, /變化 1 筆（價格 1）/);
+  assert.match(text, /11:01 價格 ¥63,800 → 無方案/, 'states what is known, claims nothing more');
+  assert.match(text, /截止時：已滿 剩0$/m);
+});
+
+test('the closure group renders as one headline plus a capped room list', () => {
+  const events = Array.from({ length: 14 }, (_, i) =>
+    closing(`房型${String(i + 1).padStart(2, '0')}`),
+  );
+  const text = formatSummary(summarizeWindow({ events, polls: [] }, SEP16, configWith()));
+
+  assert.match(text, /變化 14 筆（訂房截止 14）/);
+  assert.match(text, /🕛 2026-09-16 訂房截止（11:01 起 14 個房型下架）/);
+  assert.match(text, /房型01、房型02/);
+  assert.match(text, /…（共 14 個）/);
+  assert.doesNotMatch(text, /房型14/, 'the tail is summarised, not listed');
+  // The names wrap themselves, so splitMessage never has to break one mid-name.
+  const nameLines = text.split('\n').filter((line) => line.startsWith('   房型'));
+  assert.ok(nameLines.length > 1, 'the list wraps');
+  for (const line of nameLines) assert.ok(line.length <= 40, `line too wide: ${line}`);
+});
+
+test('a same-day room still bookable at the cutoff is the date closing', () => {
+  const summary = summarizeWindow(
+    {
+      events: [
+        closing('和室', {
+          kind: 'disappear',
+          from: { available: true, stockStatus: 'FEW_STOCK', stockNum: 1, memberPrice: 63800 },
+        }),
+        closing('和室', {
+          from: { available: true, stockStatus: 'FEW_STOCK', stockNum: 1, memberPrice: 63800 },
+        }),
+      ],
+      polls: [],
+    },
+    SEP16,
+    configWith(),
+  );
+  // NO_SALE, not SOLD_OUT: booking closed on it, nobody took it.
+  assert.deepEqual(summary.counts, { expire: 1 });
+  assert.equal(summary.closures[0].count, 1);
+});
+
+test('a same-day room that is booked away is a sell-out, not the date closing', () => {
+  const booked = {
+    from: { available: true, stockStatus: 'FEW_STOCK', stockNum: 1, memberPrice: 63800 },
+    to: { available: false, stockStatus: 'SOLD_OUT', stockNum: 0, memberPrice: null },
+  };
+  // Same salesDate as the cutoff case, so only the API's own status tells them apart.
+  assert.equal(displayKind(closing('和室', booked), configWith().reportTz), null);
+
+  const summary = summarizeWindow(
+    {
+      events: [closing('和室', { ...booked, kind: 'disappear' }), closing('和室', booked)],
+      polls: [],
+    },
+    SEP16,
+    configWith(),
+  );
+  assert.deepEqual(summary.counts, { disappear: 1 });
+  assert.equal(summary.closures.length, 0, 'a booking never joins the 訂房截止 group');
 });
