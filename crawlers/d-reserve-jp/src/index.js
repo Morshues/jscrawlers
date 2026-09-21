@@ -7,29 +7,39 @@ import {
   appendJsonl,
   saveJson,
   readJson,
+  readJsonl,
   outputDir,
   createNotifier,
+  createInbox,
   pollLoop,
 } from '@jscrawlers/core';
 
 import { loadConfig, parseDuration } from './config.js';
 import { fetchSnapshot } from './api.js';
 import { diffSnapshots } from './diff.js';
-import { selectNotifications, buildPayloads } from './watch.js';
+import {
+  selectNotifications,
+  buildPayloads,
+  buildClosedPayloads,
+  resolveAck,
+  resolveCell,
+} from './watch.js';
 import { readHistory, buildReport, formatReport } from './report.js';
 import { pendingWindows, summarizeWindow, buildSummaryPayloads } from './daily-summary.js';
 
 const NAME = 'd-reserve-jp';
 const STATE_FILE = 'state.json';
 const DAILY_STATE_FILE = 'daily-summary-state.json';
+const ACK_FILE = 'ack.jsonl';
 
-const { values } = parseArgs({
+const { values, positionals } = parseArgs({
   interval: { type: 'string' }, // "5m" -> stay resident; absent -> one shot
   report: { type: 'boolean', default: false },
   since: { type: 'string' },
   'dry-run': { type: 'boolean', default: false },
   'notify-test': { type: 'boolean', default: false },
   'daily-summary': { type: 'boolean', default: false },
+  ack: { type: 'boolean', default: false }, // stop reminding me; optional filter
 });
 
 /** Events are sharded by month so no single file grows without bound. */
@@ -47,15 +57,61 @@ async function pruneRaw(keep, log) {
 }
 
 /**
+ * Record a "stop reminding me" command.
+ *
+ * Appending to a log rather than editing state.json is what makes `--ack` safe
+ * to run against a resident watcher: two writers that only ever append cannot
+ * clobber each other, and the file doubles as a record of who said stop when.
+ */
+async function recordAck(entry, log) {
+  await appendJsonl(NAME, ACK_FILE, entry);
+  const what = entry.filter ? `（${entry.filter}）` : '（全部）';
+  log.info(`已記錄停止提醒指令${what}，下一次輪詢生效`);
+  return entry;
+}
+
+/**
+ * Fold the commands nobody has applied yet into the notification bookkeeping.
+ *
+ * Only cells that are currently being announced can be silenced: an ack for
+ * something that is not alerting has nothing to stop, and letting it linger
+ * would silence a genuine opening later.
+ *
+ * @returns {{ acked: string[], cursor: string|null }}
+ */
+async function pendingAcks(state) {
+  const cursor = state.ackCursor ?? null;
+  const entries = (await readJsonl(NAME, ACK_FILE)).filter(
+    (entry) => entry?.ts && (!cursor || entry.ts > cursor),
+  );
+  if (entries.length === 0) return { acked: [], cursor };
+
+  const alerting = Object.keys(state.notified ?? {});
+  const acked = new Set();
+  for (const entry of entries) {
+    for (const key of resolveAck(entry.filter, alerting, state.cells ?? {})) acked.add(key);
+  }
+
+  return {
+    acked: [...acked],
+    cursor: entries.reduce(
+      (latest, entry) => (entry.ts > latest ? entry.ts : latest),
+      cursor ?? '',
+    ),
+  };
+}
+
+/**
  * One full cycle: fetch, diff against the stored snapshot, persist the changes,
  * then decide whether anything is worth a notification.
  *
  * The two phases deliberately share a single fetch — running them separately
  * would double the request rate and let them disagree about the same minute.
  */
-async function pollOnce({ config, log, signal, notify, dryRun }) {
+async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
   const startedAt = Date.now();
   const state = (await readJson(NAME, STATE_FILE)) ?? {};
+  const untilAck = config.notify.mode === 'until-ack';
 
   let snapshot;
   try {
@@ -72,6 +128,23 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     throw error;
   }
 
+  // Commands arrive between polls, and are read before anything is announced so
+  // a /stop sent a minute ago silences this poll's reminder rather than the next.
+  const inboxState = { ...(state.inbox ?? {}) };
+  if (inbox) {
+    const { commands, offset } = await inbox({ offset: inboxState.telegramOffset, signal });
+    for (const command of commands) {
+      log.info(
+        `收到停止提醒指令（${command.channel}）${command.filter ? `：${command.filter}` : ''}`,
+      );
+      if (!dryRun) {
+        await recordAck({ ts: command.ts, source: command.channel, filter: command.filter }, log);
+      }
+    }
+    inboxState.telegramOffset = offset;
+  }
+  const { acked, cursor } = untilAck ? await pendingAcks(state) : { acked: [], cursor: null };
+
   // Must agree with diffSnapshots' own seeding test, which keys off an empty map.
   const seeding = Object.keys(state.cells ?? {}).length === 0;
   const cellCount = Object.keys(snapshot.cells).length;
@@ -87,20 +160,27 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     log.info(`  ${event.kind}: ${event.roomName} ${event.salesDate}`);
   }
 
-  const { matches, fresh, notified } = selectNotifications(
+  const { matches, fresh, closed, notified } = selectNotifications(
     snapshot.cells,
     config,
     state.notified ?? {},
-    { now: Date.parse(snapshot.fetchedAt) },
+    { now: Date.parse(snapshot.fetchedAt), acked },
   );
+  // Only a watcher that was nagging owes an explanation for going quiet.
+  const closedCells = untilAck
+    ? closed.map((key) => resolveCell(key, snapshot.cells, state.cells))
+    : [];
 
   if (dryRun) {
     log.info(`[dry-run] ${matches.length} cells match the watch filter, ${fresh.length} are new`);
     for (const cell of matches)
       log.info(`  match: ${cell.salesDate} ${cell.roomName} 剩${cell.stockNum}`);
+    if (acked.length > 0) log.info(`[dry-run] ${acked.length} 筆會被停止提醒`);
     for (const payload of buildPayloads(fresh, config))
       log.info(`[dry-run] would notify:\n${payload.text}`);
-    return { snapshot, events, matches, fresh, notified: false };
+    for (const payload of buildClosedPayloads(closedCells, config))
+      log.info(`[dry-run] would notify:\n${payload.text}`);
+    return { snapshot, events, matches, fresh, closed, notified: false };
   }
 
   // Events are appended before the state advances. A crash in between then
@@ -119,6 +199,8 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     rooms: snapshot.rooms,
     cells: snapshot.cells,
     notified,
+    ackCursor: cursor,
+    inbox: inboxState,
   });
 
   await appendJsonl(NAME, 'polls.jsonl', {
@@ -149,7 +231,7 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
       for (const cell of fresh) log.info(`  ${cell.salesDate} ${cell.roomName} 剩${cell.stockNum}`);
       log.info('set DRESERVE_NOTIFY_ON_FIRST_RUN=true to be alerted about these too');
     }
-    return { snapshot, events, matches, fresh, notified: false };
+    return { snapshot, events, matches, fresh, closed, notified: false };
   }
 
   // A notification failure must never abort the run: the history is the part we
@@ -159,7 +241,14 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     await notify(payload, { signal });
   }
 
-  return { snapshot, events, matches, fresh, notified: fresh.length > 0 };
+  for (const payload of buildClosedPayloads(closedCells, config, {
+    detectedAt: snapshot.fetchedAt,
+  })) {
+    log.info(payload.title);
+    await notify(payload, { signal });
+  }
+
+  return { snapshot, events, matches, fresh, closed, notified: fresh.length > 0 };
 }
 
 /**
@@ -294,6 +383,15 @@ await runCrawler(NAME, async ({ log, signal }) => {
 
   if (values.report) return runReport({ config, log });
 
+  // Pure bookkeeping: never touches the network, so it works while the watcher
+  // is mid-poll, offline, or not running at all.
+  if (values.ack) {
+    return recordAck(
+      { ts: new Date().toISOString(), source: 'cli', filter: positionals[0] ?? null },
+      log,
+    );
+  }
+
   if (values['daily-summary']) {
     // Falls back to the shared channel list so one .env covers both jobs.
     const channels =
@@ -308,6 +406,17 @@ await runCrawler(NAME, async ({ log, signal }) => {
   }
 
   const notify = createNotifier({ channels: config.notify.channels, logger: log });
+  const inbox =
+    config.notify.ackChannels.length > 0
+      ? createInbox({ channels: config.notify.ackChannels, logger: log })
+      : null;
+
+  if (config.notify.legacyCooldown) {
+    log.warn(
+      'DRESERVE_NOTIFY_COOLDOWN_MIN is superseded by DRESERVE_NOTIFY_MODE=until-ack plus ' +
+        'DRESERVE_NOTIFY_REPEAT_MIN; using it as the repeat interval for now',
+    );
+  }
 
   if (values['notify-test']) {
     const payload = {
@@ -331,17 +440,23 @@ await runCrawler(NAME, async ({ log, signal }) => {
     `${config.hotelCode} ${config.fromDate}..${config.toDate} ` +
       `(${config.windows.length} window(s), lodgerNum=${config.query.lodgerNum})`,
   );
+  log.info(
+    config.notify.mode === 'until-ack'
+      ? `通知模式 until-ack：每 ${config.notify.repeatMs / 60_000} 分鐘提醒一次，` +
+          `直到 ${inbox ? 'Telegram /stop、' : ''}--ack 或房間消失`
+      : '通知模式 once：每次上架只通知一次',
+  );
 
   const intervalMs = values.interval
     ? parseDuration(values.interval, '--interval')
     : config.poll.intervalMs;
 
-  if (!values.interval) return pollOnce({ config, log, signal, notify, dryRun });
+  if (!values.interval) return pollOnce({ config, log, signal, notify, inbox, dryRun });
 
   // Resident mode. A single failed poll must not end the watch — the next one
   // may well be the release we are waiting for.
   return pollLoop({
-    task: () => pollOnce({ config, log, signal, notify, dryRun }),
+    task: () => pollOnce({ config, log, signal, notify, inbox, dryRun }),
     intervalMs,
     signal,
     logger: log,

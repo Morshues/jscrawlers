@@ -6,8 +6,11 @@ import { selectFresh } from '@jscrawlers/core';
  *
  * The hard part is not matching, it is not spamming: this room is sold out for
  * months, so when a cancellation lands the cell stays bookable across many
- * polls. Notifications therefore fire on the *edge* (not bookable -> bookable),
- * with an optional cooldown for a repeat nudge while it is still open.
+ * polls. Notifications therefore fire on the *edge* (not bookable -> bookable).
+ *
+ * In `until-ack` mode the edge is only the first of many: the reminder repeats
+ * every DRESERVE_NOTIFY_REPEAT_MIN until you say stop, and the cell being
+ * booked away earns a closing notice so silence is never ambiguous.
  */
 
 const DOW_SHORT = {
@@ -45,38 +48,83 @@ export function matchesWatch(cell, watch) {
  *
  * @param {object} cells current cells map
  * @param {object} config loaded config
- * @param {Record<string, { lastNotifiedAt: string }>} notified previous state
- * @param {{ now?: number }} [options]
- * @returns {{ matches: object[], fresh: object[], notified: object }}
+ * @param {Record<string, { lastNotifiedAt: string, ackedAt?: string }>} notified previous state
+ * @param {{ now?: number, acked?: Iterable<string> }} [options]
+ * @returns {{ matches: object[], fresh: object[], closed: string[], notified: object }}
  */
-export function selectNotifications(cells, config, notified = {}, { now = Date.now() } = {}) {
+export function selectNotifications(
+  cells,
+  config,
+  notified = {},
+  { now = Date.now(), acked = [] } = {},
+) {
   const matching = Object.entries(cells).filter(([, cell]) => matchesWatch(cell, config.watch));
-  const { fresh, notified: next } = selectFresh(
+  const {
+    fresh,
+    closed,
+    notified: next,
+  } = selectFresh(
     matching.map(([key]) => key),
     notified,
-    { cooldownMs: config.notify.cooldownMs, now },
+    // `once` never repeats, whatever the interval is set to.
+    { cooldownMs: config.notify.mode === 'until-ack' ? config.notify.repeatMs : 0, now, acked },
   );
   const byKey = new Map(matching);
 
   return {
     matches: matching.map(([, cell]) => cell),
     fresh: fresh.map((key) => byKey.get(key)),
+    closed,
     notified: next,
   };
+}
+
+/**
+ * Which keys a stop command applies to.
+ *
+ * No filter means "everything you are currently nagging me about". A filter is
+ * matched against the key (room code and date) and the room name, so
+ * "2026-10-09", "RM00010235" and "特別室" all work.
+ *
+ * @param {string|null} filter
+ * @param {Iterable<string>} keys the keys currently being announced
+ * @param {object} [cells] whatever is known about them, for the room name
+ */
+export function resolveAck(filter, keys, cells = {}) {
+  const needle = String(filter ?? '').trim();
+  if (needle === '') return [...keys];
+  return [...keys].filter((key) => `${key} ${cells[key]?.roomName ?? ''}`.includes(needle));
+}
+
+/**
+ * Best-effort cell for a key, for a notice about something that is already
+ * gone. Falls back to the key itself, which at least names the room and date.
+ */
+export function resolveCell(key, ...sources) {
+  for (const source of sources) {
+    if (source?.[key]) return source[key];
+  }
+  const [roomCode, salesDate] = key.split('|');
+  return { roomCode, roomName: roomCode, salesDate, dayOfWeek: null, stockNum: 0 };
 }
 
 function formatPrice(value) {
   return value === null ? '價格不明' : `¥${value.toLocaleString('zh-TW')}`;
 }
 
-function describe(cell) {
+/** "2026-10-09 (五)  露天風呂付特別室" — which cell, without the numbers. */
+function identify(cell) {
   const dow = DOW_SHORT[cell.dayOfWeek] ?? cell.dayOfWeek;
+  return `${cell.salesDate}${dow ? ` (${dow})` : ''}  ${cell.roomName}`;
+}
+
+function describe(cell) {
   const price = formatPrice(cell.memberPrice);
   const regular =
     cell.regularPrice !== null && cell.regularPrice !== cell.memberPrice
       ? `（一般價 ${formatPrice(cell.regularPrice)}）`
       : '';
-  return `${cell.salesDate} (${dow})  ${cell.roomName}  剩${cell.stockNum}  ${price}${regular}`;
+  return `${identify(cell)}  剩${cell.stockNum}  ${price}${regular}`;
 }
 
 /**
@@ -118,9 +166,49 @@ export function buildPayload(cells, config, { detectedAt = new Date().toISOStrin
   };
 }
 
+/**
+ * The other bookend: a cell that was being announced is no longer bookable.
+ *
+ * Only `until-ack` sends these. After a stream of reminders, silence on its own
+ * is ambiguous — "booked away" and "the crawler died" look identical — and this
+ * is the message that tells them apart.
+ */
+export function buildClosedPayload(cells, config, { detectedAt = new Date().toISOString() } = {}) {
+  const sorted = [...cells].sort(
+    (a, b) => a.salesDate.localeCompare(b.salesDate) || a.roomName.localeCompare(b.roomName),
+  );
+  const first = sorted[0];
+  const more = sorted.length > 1 ? ` 另 ${sorted.length - 1} 筆` : '';
+
+  return {
+    source: 'd-reserve-jp',
+    event: 'availability-closed',
+    hotelCode: config.hotelCode,
+    title: `提醒結束：${first.roomName} ${first.salesDate}${more}`,
+    text: [
+      ...sorted.map((cell) => `• ${identify(cell)}`),
+      '',
+      '已被訂走（或不再可訂），停止提醒。',
+    ].join('\n'),
+    bookingUrl: config.notify.bookingUrl || null,
+    detectedAt,
+    matches: sorted.map((cell) => ({
+      roomCode: cell.roomCode,
+      roomName: cell.roomName,
+      salesDate: cell.salesDate,
+      dayOfWeek: cell.dayOfWeek,
+    })),
+  };
+}
+
 /** One payload for everything, or one per cell, per DRESERVE_NOTIFY_GROUPED. */
-export function buildPayloads(cells, config, options) {
+export function buildPayloads(cells, config, options, build = buildPayload) {
   if (cells.length === 0) return [];
-  if (config.notify.grouped) return [buildPayload(cells, config, options)];
-  return cells.map((cell) => buildPayload([cell], config, options));
+  if (config.notify.grouped) return [build(cells, config, options)];
+  return cells.map((cell) => build([cell], config, options));
+}
+
+/** buildPayloads, for the closing notice. */
+export function buildClosedPayloads(cells, config, options) {
+  return buildPayloads(cells, config, options, buildClosedPayload);
 }

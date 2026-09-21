@@ -88,6 +88,16 @@ export function addDays(date, days) {
   return stamp.toISOString().slice(0, 10);
 }
 
+/**
+ * How long an alert keeps nagging.
+ *
+ * `once` announces an opening and then goes quiet — what a watcher has always
+ * done. `until-ack` keeps reminding you every DRESERVE_NOTIFY_REPEAT_MIN until
+ * you tell it to stop (Telegram /stop, or `--ack`) or the room goes away, which
+ * is the mode to use when missing the alert means missing the room.
+ */
+export const NOTIFY_MODES = new Set(['once', 'until-ack']);
+
 const DAYS_OF_WEEK = new Set([
   'MONDAY',
   'TUESDAY',
@@ -120,6 +130,34 @@ export function loadConfig(env = process.env) {
   }
 
   const maxPrice = read.optional('DRESERVE_WATCH_MAX_PRICE');
+
+  const channels = read.list('DRESERVE_NOTIFY_CHANNELS');
+  const cooldownMin = read.number('DRESERVE_NOTIFY_COOLDOWN_MIN', 0);
+  const declaredMode = read.optional('DRESERVE_NOTIFY_MODE');
+  if (declaredMode && !NOTIFY_MODES.has(declaredMode)) {
+    throw new Error(
+      `DRESERVE_NOTIFY_MODE must be one of ${[...NOTIFY_MODES].join(', ')}, got "${declaredMode}"`,
+    );
+  }
+
+  // The old cooldown knob did half of until-ack: repeat, but with no way to
+  // stop. Honouring it keeps an existing .env alerting at the same cadence.
+  const legacyCooldown = !declaredMode && cooldownMin > 0;
+  const mode = declaredMode || (legacyCooldown ? 'until-ack' : 'once');
+  const repeatMin = read.number('DRESERVE_NOTIFY_REPEAT_MIN', legacyCooldown ? cooldownMin : 10);
+  if (mode === 'until-ack' && !(repeatMin > 0)) {
+    throw new Error(`DRESERVE_NOTIFY_REPEAT_MIN must be greater than 0, got "${repeatMin}"`);
+  }
+
+  // getUpdates hands each message to whoever asks first, so two crawlers on one
+  // bot token would steal each other's commands. Only this one listens, and
+  // this is the switch to turn that off.
+  const ackChannels =
+    mode === 'until-ack' &&
+    channels.includes('telegram') &&
+    read.bool('DRESERVE_NOTIFY_ACK_TELEGRAM', true)
+      ? ['telegram']
+      : [];
 
   return {
     apiBase: read.optional('DRESERVE_API_BASE', 'https://d-reserve.jp'),
@@ -154,8 +192,11 @@ export function loadConfig(env = process.env) {
     },
 
     notify: {
-      channels: read.list('DRESERVE_NOTIFY_CHANNELS'),
-      cooldownMs: read.number('DRESERVE_NOTIFY_COOLDOWN_MIN', 0) * 60_000,
+      channels,
+      mode,
+      repeatMs: repeatMin * 60_000,
+      ackChannels,
+      legacyCooldown,
       grouped: read.bool('DRESERVE_NOTIFY_GROUPED', true),
       onFirstRun: read.bool('DRESERVE_NOTIFY_ON_FIRST_RUN', false),
       bookingUrl: read.optional('DRESERVE_BOOKING_URL'),

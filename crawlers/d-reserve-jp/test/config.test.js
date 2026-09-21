@@ -103,3 +103,69 @@ test('loadConfig defaults leave the watch unrestricted', () => {
   assert.equal(config.query.lodgerNum, '2_0_0_0_0_0');
   assert.equal(config.windows.length, 2);
 });
+
+// ── notification modes ──────────────────────────────────────────────────────
+
+test('the default is the one-shot alert, with nothing listening for commands', () => {
+  const { notify } = loadConfig(BASE_ENV);
+  assert.equal(notify.mode, 'once');
+  assert.deepEqual(notify.ackChannels, []);
+  assert.equal(notify.legacyCooldown, false);
+});
+
+test('loadConfig rejects a mode it does not know', () => {
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, DRESERVE_NOTIFY_MODE: 'forever' }),
+    /DRESERVE_NOTIFY_MODE must be one of once, until-ack/,
+  );
+});
+
+test('until-ack needs an interval that actually elapses', () => {
+  assert.throws(
+    () =>
+      loadConfig({
+        ...BASE_ENV,
+        DRESERVE_NOTIFY_MODE: 'until-ack',
+        DRESERVE_NOTIFY_REPEAT_MIN: '0',
+      }),
+    /DRESERVE_NOTIFY_REPEAT_MIN must be greater than 0/,
+  );
+  const { notify } = loadConfig({ ...BASE_ENV, DRESERVE_NOTIFY_MODE: 'until-ack' });
+  assert.equal(notify.repeatMs, 10 * 60_000, 'ten minutes unless told otherwise');
+});
+
+test('an existing cooldown keeps its cadence and gains a way to stop', () => {
+  const { notify } = loadConfig({ ...BASE_ENV, DRESERVE_NOTIFY_COOLDOWN_MIN: '30' });
+  assert.equal(notify.mode, 'until-ack');
+  assert.equal(notify.repeatMs, 30 * 60_000);
+  assert.equal(notify.legacyCooldown, true, 'so the run can say it has been superseded');
+
+  // An explicit mode wins: the old knob is then only a fallback interval.
+  const explicit = loadConfig({
+    ...BASE_ENV,
+    DRESERVE_NOTIFY_MODE: 'once',
+    DRESERVE_NOTIFY_COOLDOWN_MIN: '30',
+  });
+  assert.equal(explicit.notify.mode, 'once');
+  assert.equal(explicit.notify.legacyCooldown, false);
+});
+
+test('Telegram only listens for /stop when it is a channel and the mode nags', () => {
+  const on = loadConfig({
+    ...BASE_ENV,
+    DRESERVE_NOTIFY_MODE: 'until-ack',
+    DRESERVE_NOTIFY_CHANNELS: 'telegram,webhook',
+  });
+  assert.deepEqual(on.notify.ackChannels, ['telegram']);
+
+  const off = loadConfig({
+    ...BASE_ENV,
+    DRESERVE_NOTIFY_MODE: 'until-ack',
+    DRESERVE_NOTIFY_CHANNELS: 'telegram',
+    DRESERVE_NOTIFY_ACK_TELEGRAM: 'false',
+  });
+  assert.deepEqual(off.notify.ackChannels, [], 'the escape hatch for a shared bot token');
+
+  const onceMode = loadConfig({ ...BASE_ENV, DRESERVE_NOTIFY_CHANNELS: 'telegram' });
+  assert.deepEqual(onceMode.notify.ackChannels, [], 'nothing to stop in once mode');
+});

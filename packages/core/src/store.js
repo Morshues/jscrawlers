@@ -81,6 +81,34 @@ export async function appendJsonl(crawler, filename, records) {
   return file;
 }
 
+/**
+ * Read a JSONL file from data/<crawler>/ as an array of records.
+ *
+ * A half-written final line can happen if a run was killed mid-append, so a
+ * malformed line is skipped rather than taking the whole read down with it.
+ */
+export async function readJsonl(crawler, filename, fallback = []) {
+  const file = path.join(dataRoot, crawler, filename);
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return fallback;
+    throw error;
+  }
+
+  const records = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      process.emitWarning(`skipping malformed JSONL in ${filename}`);
+    }
+  }
+  return records;
+}
+
 /** Read a JSON file from data/<crawler>/, or `fallback` if it does not exist. */
 export async function readJson(crawler, filename, fallback = null) {
   const file = path.join(dataRoot, crawler, filename);

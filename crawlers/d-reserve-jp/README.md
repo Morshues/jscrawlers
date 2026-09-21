@@ -30,6 +30,7 @@ The first run seeds the baseline and deliberately sends no alert (see
 | `... -- --interval 5m`             | Stay resident and poll on a timer. Ctrl-C stops it.                  |
 | `... -- --dry-run`                 | Fetch and show what _would_ happen. No state, no alerts.             |
 | `... -- --notify-test`             | Send one fake alert to check your channels. Exits 1 if any fail.     |
+| `... -- --ack [filter]`            | Stop the reminders for everything, or just what the filter names.    |
 | `... -- --report`                  | Statistics from local data. Never touches the network.               |
 | `... -- --report --since 7d`       | Same, limited to a recent window.                                    |
 | `... -- --daily-summary`           | Send every daily digest still owed. This is what the 20:00 job runs. |
@@ -122,10 +123,45 @@ open room. So the baseline run logs what is bookable and sends nothing. Set
 ### Not being spammed
 
 A cancellation stays bookable across many polls. Alerts therefore fire on the
-**rising edge** (not bookable → bookable), once. Set
-`DRESERVE_NOTIFY_COOLDOWN_MIN` above 0 to be re-reminded every N minutes while a
-room is still open. When a room closes again, its bookkeeping is dropped, so a
-later reopening counts as a fresh alert.
+**rising edge** (not bookable → bookable), never once per poll. When a room
+closes again its bookkeeping is dropped, so a later reopening is a fresh alert.
+
+How long one opening keeps talking to you is `DRESERVE_NOTIFY_MODE`:
+
+- **`once`** (default) — one message per opening, then silence. What a watcher
+  has always done.
+- **`until-ack`** — the same message again every `DRESERVE_NOTIFY_REPEAT_MIN`
+  minutes until you say stop, or the room is taken. Use it when missing the
+  alert means missing the room.
+
+Two ways to say stop, both of which only affect rooms that are being announced
+right now:
+
+```bash
+npm run crawl d-reserve-jp -- --ack              # everything
+npm run crawl d-reserve-jp -- --ack 2026-10-09   # a date, a room code or a room name
+```
+
+or reply `/stop` (`/ack` works too, and both take the same optional filter) to
+the Telegram bot. Commands are read at the start of each poll, so a `/stop` sent
+a minute ago stops that poll's reminder. They are appended to `ack.jsonl` rather
+than written into `state.json`, which is what makes `--ack` safe to run against a
+watcher that is mid-poll: two writers that only append cannot clobber each other.
+
+A room that goes away while `until-ack` is reminding you earns one closing
+message — after a stream of reminders, silence on its own cannot be told apart
+from a crawler that died. An ack does not outlive its room: once that room is
+gone, a later reopening alerts again from scratch.
+
+The repeat interval is quantised by the poll interval — a 5m poll with
+`REPEAT_MIN=10` reminds you somewhere between 10 and 15 minutes apart.
+
+**One bot, one listener.** Telegram's `getUpdates` hands each message to whoever
+asks for it first and then deletes it, so two crawlers sharing a bot token would
+steal each other's commands. Only this crawler listens; set
+`DRESERVE_NOTIFY_ACK_TELEGRAM=false` to turn that off, or give each crawler its
+own bot. A bot with a webhook configured cannot use `getUpdates` at all — that
+shows up as a warning in the log and `--ack` still works.
 
 ### The daily digest
 
@@ -181,6 +217,7 @@ data/d-reserve-jp/
   state.json            latest full snapshot + notification bookkeeping
   events-YYYYMM.jsonl   only cells that changed — the history that matters
   polls.jsonl           one line per poll, including failures
+  ack.jsonl             every "stop reminding me", from --ack or Telegram
   report-<stamp>.json   saved by --report
   daily-summary-state.json  digest checkpoint: last fully delivered window
   raw/<stamp>.json.gz   raw responses, only when DRESERVE_KEEP_RAW=true
