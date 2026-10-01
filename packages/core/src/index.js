@@ -24,3 +24,10 @@ export { pollLoop } from './poll.js';
 export { selectFresh } from './alerts.js';
 export { createNotifier, NOTIFY_CHANNELS } from './notify.js';
 export { createInbox, parseCommand, parseTelegramUpdates, INBOX_CHANNELS } from './inbox.js';
+export {
+  signRequest,
+  verifyRequest,
+  createReplayGuard,
+  SIGNATURE_HEADER,
+  TIMESTAMP_HEADER,
+} from './sign.js';

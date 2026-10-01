@@ -210,6 +210,28 @@ so existing history does not arrive as a dozen messages.
 are named in the first message. Long digests are split at line boundaries, never
 mid-line, into `(1/n)` messages.
 
+### Handing rooms to the booker
+
+This crawler never books. Booking needs a login, guest details and a payment
+link, none of which belong where this crawler (and whatever drives it) can read
+them, so it lives in [`d-reserve-booker`](../d-reserve-booker/README.md) on
+another machine.
+
+With `DRESERVE_BOOKER_URL` and `DRESERVE_BOOKER_SECRET` set, every poll that
+finds matches sends them — room, date, plan, price, nothing else — as a signed
+request, before the alerts go out. The booker answers only yes or no:
+
+```
+已交給訂房機：2026-10-29 RM00010236
+訂房機未受理：locked | busy | no-eligible-cell | unreachable (…)
+```
+
+An accepted hand-off adds `🤖 已交給訂房機` to that poll's alert. Whether the
+booking then went through, and where to pay, the booker tells you directly; this
+crawler never finds out. All matches are sent on every poll, the first run
+included — what to book, and whether to retry, is the booker's call. A booker
+that is down costs at most `DRESERVE_BOOKER_TIMEOUT_MS` and never the alert.
+
 ### Output
 
 ```

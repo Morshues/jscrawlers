@@ -26,6 +26,7 @@ import {
 } from './watch.js';
 import { readHistory, buildReport, formatReport } from './report.js';
 import { pendingWindows, summarizeWindow, buildSummaryPayloads } from './daily-summary.js';
+import { requestBooking } from './booker-client.js';
 
 const NAME = 'd-reserve-jp';
 const STATE_FILE = 'state.json';
@@ -180,6 +181,11 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
       log.info(`[dry-run] would notify:\n${payload.text}`);
     for (const payload of buildClosedPayloads(closedCells, config))
       log.info(`[dry-run] would notify:\n${payload.text}`);
+    if (config.booker && matches.length > 0) {
+      log.info(
+        `[dry-run] would hand ${matches.length} cell(s) to the booker at ${config.booker.url}`,
+      );
+    }
     return { snapshot, events, matches, fresh, closed, notified: false };
   }
 
@@ -220,6 +226,26 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
     await pruneRaw(config.poll.rawKeep, log);
   }
 
+  // Booking runs on another machine that holds the login and its own policy
+  // (crawlers/d-reserve-booker); this only tells it what is open. It goes before
+  // the alerts because the booker answers within a second and a cancelled room
+  // is gone within minutes, and before the first-run rule because an open room
+  // is worth booking whether or not it counts as a release. Every match is sent,
+  // not only fresh ones: the booker decides, and retries a failed attempt on a
+  // later poll.
+  const handoff =
+    config.booker && matches.length > 0
+      ? await requestBooking(config, matches, { logger: log, signal })
+      : null;
+  if (handoff?.accepted) {
+    log.warn(
+      `已交給訂房機：${handoff.target.salesDate} ${handoff.target.roomCode}` +
+        (handoff.submit ? '' : '（演練模式）'),
+    );
+  } else if (handoff) {
+    log.info(`訂房機未受理：${handoff.reason}`);
+  }
+
   // The first run has no baseline, so it cannot tell "just released" from "open
   // for weeks" — alerting on that would be a false release signal, and with an
   // unset watch filter it fires for whatever happens to be open. The matches are
@@ -231,12 +257,19 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
       for (const cell of fresh) log.info(`  ${cell.salesDate} ${cell.roomName} 剩${cell.stockNum}`);
       log.info('set DRESERVE_NOTIFY_ON_FIRST_RUN=true to be alerted about these too');
     }
-    return { snapshot, events, matches, fresh, closed, notified: false };
+    return { snapshot, events, matches, fresh, closed, notified: false, handoff };
+  }
+
+  const alerts = buildPayloads(fresh, config, { detectedAt: snapshot.fetchedAt });
+  if (handoff?.accepted && alerts.length > 0) {
+    alerts[0].text +=
+      `\n\n🤖 已交給訂房機：${handoff.target.salesDate} ${handoff.target.roomCode}` +
+      (handoff.submit ? '' : '（演練）');
   }
 
   // A notification failure must never abort the run: the history is the part we
   // cannot reconstruct later, and it is already safely on disk by this point.
-  for (const payload of buildPayloads(fresh, config, { detectedAt: snapshot.fetchedAt })) {
+  for (const payload of alerts) {
     log.warn(`偵測到空房：${payload.title}`);
     await notify(payload, { signal });
   }
@@ -248,7 +281,7 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
     await notify(payload, { signal });
   }
 
-  return { snapshot, events, matches, fresh, closed, notified: fresh.length > 0 };
+  return { snapshot, events, matches, fresh, closed, notified: fresh.length > 0, handoff };
 }
 
 /**

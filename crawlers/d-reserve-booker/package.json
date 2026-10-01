@@ -1,0 +1,15 @@
+{
+  "name": "@jscrawlers/d-reserve-booker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Books a d-reserve.jp room up to the JTB card page when a watcher asks; holds the secrets the watcher must not see",
+  "main": "./src/main.js",
+  "scripts": {
+    "start": "node src/main.js --serve"
+  },
+  "dependencies": {
+    "@jscrawlers/core": "*",
+    "express": "^5.2.1"
+  }
+}

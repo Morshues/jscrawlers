@@ -214,5 +214,27 @@ export function loadConfig(env = process.env) {
     },
 
     reportTz: read.optional('DRESERVE_REPORT_TZ', 'Asia/Tokyo'),
+
+    // Booking happens on another machine (crawlers/d-reserve-booker), which
+    // holds the login and decides what may be booked. This side only knows
+    // where to knock and how to sign the knock.
+    booker: readBooker(read),
   };
+}
+
+function readBooker(read) {
+  const url = read.optional('DRESERVE_BOOKER_URL');
+  if (!url) return null;
+  try {
+    new URL(url);
+  } catch {
+    throw new Error(`DRESERVE_BOOKER_URL is not a URL: "${url}"`);
+  }
+  const secret = read.optional('DRESERVE_BOOKER_SECRET');
+  if (secret.length < 32) {
+    throw new Error(
+      'DRESERVE_BOOKER_SECRET must be set (32+ characters) when DRESERVE_BOOKER_URL is',
+    );
+  }
+  return { url, secret, timeoutMs: read.number('DRESERVE_BOOKER_TIMEOUT_MS', 3000) };
 }
