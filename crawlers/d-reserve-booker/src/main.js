@@ -8,7 +8,8 @@
  * be. So the env file and the data directory both default to the home
  * directory, and anything that would put them back inside the repo is refused.
  *
- *   BOOKER_ENV_FILE  default ~/.config/d-reserve-booker/booker.env  (chmod 600)
+ *   BOOKER_ENV_FILE  default ~/.config/d-reserve-booker/booker.env  (chmod 600;
+ *                    not checked on Windows, see below)
  *   DATA_ROOT        default ~/.local/share/d-reserve-booker
  *
  * DATA_ROOT has to be settled before @jscrawlers/core is imported — its store
@@ -40,9 +41,23 @@ if (insideRepo(envFile)) fail(`refusing an env file inside the repository: ${env
 if (!fs.existsSync(envFile)) {
   fail(`no env file at ${envFile} — copy crawlers/d-reserve-booker/booker.env.example there`);
 }
-const mode = fs.statSync(envFile).mode & 0o777;
-if (mode & 0o077) {
-  fail(`${envFile} is readable by others (mode ${mode.toString(8)}); run: chmod 600 "${envFile}"`);
+// Windows keeps access rights in NTFS ACLs, which fs.stat cannot see: its mode
+// only reflects the read-only attribute, so every ordinary file reads as 666
+// and the check would refuse a file that is in fact locked down. There the
+// file is trusted to the user profile's default ACL, and the log says how to
+// tighten it.
+if (process.platform === 'win32') {
+  console.warn(
+    `[d-reserve-booker] file permissions are not checked on Windows. To limit ${envFile} ` +
+      `to your account: icacls "${envFile}" /inheritance:r /grant:r "${os.userInfo().username}:F"`,
+  );
+} else {
+  const mode = fs.statSync(envFile).mode & 0o777;
+  if (mode & 0o077) {
+    fail(
+      `${envFile} is readable by others (mode ${mode.toString(8)}); run: chmod 600 "${envFile}"`,
+    );
+  }
 }
 
 // Assigned over whatever is already set: if this was started through

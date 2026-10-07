@@ -164,3 +164,25 @@ Keep it resident with `KeepAlive`; `ProgramArguments` is the absolute node path,
   LaunchDaemon in `/Library/LaunchDaemons` with `UserName` = `booker` and
   `EnvironmentVariables` → `HOME` = `/Users/booker`. It then runs as `booker`
   from boot, with that user's files and nobody else's.
+
+## Running it on Windows
+
+The code runs unchanged; three things differ.
+
+- **Env file permissions are not checked.** Windows keeps access rights in NTFS
+  ACLs, which Node cannot see (`fs.stat` reports every ordinary file as 666),
+  so the `chmod 600` check is skipped and a reminder is logged instead. Lock the
+  file down yourself, in PowerShell:
+
+  ```powershell
+  icacls "$env:USERPROFILE\.config\d-reserve-booker\booker.env" /inheritance:r /grant:r "$($env:USERNAME):F"
+  ```
+
+- **Paths.** `~` is `C:\Users\<you>`, so the defaults become
+  `C:\Users\<you>\.config\d-reserve-booker\booker.env` and
+  `C:\Users\<you>\.local\share\d-reserve-booker\`.
+- **Staying up.** There is no `caffeinate` or launchd: set sleep to Never when
+  plugged in (`powercfg /change standby-timeout-ac 0`), start
+  `node crawlers\d-reserve-booker\src\main.js --serve` from Task Scheduler at
+  log-on with restart on failure, and allow node through Windows Defender
+  Firewall on private networks when first asked.
