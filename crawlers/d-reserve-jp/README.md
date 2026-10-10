@@ -303,6 +303,37 @@ argument pointing at the repo's `.env`.
 For resident mode instead, drop `StartInterval`, add `KeepAlive`, and append
 `--interval` / `5m` to `ProgramArguments`.
 
+### When the watcher itself fails
+
+A failed poll used to be a log line, and a blocked watcher looks exactly like a
+quiet market. Now every failure is counted in `state.json` (`health`), and:
+
+- after `DRESERVE_HEALTH_ALERT_AFTER` (default 3) failures in a row you get
+  `⚠️ d-reserve-jp 連續失敗 N 次`, repeated every `DRESERVE_HEALTH_REPEAT`
+  (default `1h`) while it lasts;
+- a 403/429/503, or an HTML page where JSON belongs (a WAF challenge), is marked
+  **疑似被擋** and alerts on the first failure;
+- the first good poll after an alert sends `✅ 已恢復，中斷 N 分鐘`.
+
+These go to `DRESERVE_HEALTH_CHANNELS`, or `DRESERVE_NOTIFY_CHANNELS` when blank.
+`polls.jsonl` records `blocked` and `status` for every failed poll.
+
+### Polling faster without getting blocked
+
+Each poll makes one request per two-month window of the range, so the request
+rate is `windows × polls`. In order of effect:
+
+1. **Narrow the range.** `DRESERVE_FROM_DATE`/`TO_DATE` spanning only the
+   months you care about halves the requests per dropped window, at no cost.
+2. **Back off when refused.** `DRESERVE_BACKOFF_BASE=2m` makes a failed poll
+   pause the next ones (2m, 4m, 8m … up to `DRESERVE_BACKOFF_MAX`). A
+   `Retry-After` is always honoured. The pause lives in `state.json`, so it
+   works for launchd one-shots too.
+3. **Do not retry within a poll.** `DRESERVE_HTTP_RETRIES=1` (or `0`) — at a
+   short interval the next poll is the retry.
+4. **Use resident mode.** `StartInterval` fires on an exact cadence; resident
+   mode spreads each wait by `DRESERVE_INTERVAL_JITTER` (default ±20%).
+
 ### The 20:00 daily digest
 
 A second job sends the digest, running alongside the polling job:

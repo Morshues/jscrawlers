@@ -1,4 +1,4 @@
-import { fetchJson, HttpError, throttle } from '@jscrawlers/core';
+import { fetchJson, HttpError, NotJsonError, throttle } from '@jscrawlers/core';
 
 /**
  * Client for the d-reserve.jp room calendar.
@@ -40,11 +40,47 @@ async function describeHttpError(error) {
       .map((entry) => entry.code?.split('.').pop())
       .filter(Boolean)
       .join(', ');
-    if (codes) return new Error(`${error.message} — ${body.message ?? 'error'}: ${codes}`);
+    // `cause` keeps the status and Retry-After reachable for classifyError.
+    if (codes) {
+      return new Error(`${error.message} — ${body.message ?? 'error'}: ${codes}`, { cause: error });
+    }
   } catch {
     // Not the validation shape; the original error is the best we have.
   }
   return error;
+}
+
+/**
+ * Statuses that mean "you, specifically, are being turned away" rather than
+ * "something broke": the ones a WAF or rate limiter answers with.
+ */
+const BLOCKED_STATUS = new Set([403, 429, 503]);
+
+/**
+ * Turn a failed fetch into what the health tracker needs to know: is this the
+ * site refusing us (back off, tell someone now), and did it say for how long?
+ *
+ * @returns {{ ok: false, error: string, blocked: boolean, status: number|null, retryAfterMs?: number }}
+ */
+export function classifyError(error) {
+  const root = error?.cause instanceof HttpError ? error.cause : error;
+  if (root instanceof HttpError) {
+    return {
+      ok: false,
+      error: error.message,
+      blocked: BLOCKED_STATUS.has(root.status),
+      status: root.status,
+      ...(root.retryAfterMs !== null ? { retryAfterMs: root.retryAfterMs } : {}),
+    };
+  }
+  // The calendar API always answers JSON, so an HTML page in its place is a
+  // challenge or block page, not a parsing bug.
+  return {
+    ok: false,
+    error: error?.message ?? String(error),
+    blocked: root instanceof NotJsonError,
+    status: null,
+  };
 }
 
 /** salesAvailable is the authoritative flag; stockStatus is recorded, never trusted. */
@@ -119,7 +155,7 @@ export async function fetchSnapshot(config, { logger, signal } = {}) {
 
     let body;
     try {
-      body = await fetchJson(url, { logger, signal });
+      body = await fetchJson(url, { logger, signal, retries: config.poll.httpRetries });
     } catch (error) {
       throw await describeHttpError(error);
     }

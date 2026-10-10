@@ -212,3 +212,81 @@ export function buildPayloads(cells, config, options, build = buildPayload) {
 export function buildClosedPayloads(cells, config, options) {
   return buildPayloads(cells, config, options, buildClosedPayload);
 }
+
+/** "10/10 18:05" in the given zone — enough to place an outage, no more. */
+function formatClock(iso, timeZone) {
+  return new Intl.DateTimeFormat('zh-TW', {
+    timeZone,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+    .format(new Date(iso))
+    .replace(/\s+/g, ' '); // ICU may put a narrow no-break space in there
+}
+
+function formatSpan(ms) {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  if (minutes < 60) return `${minutes} 分鐘`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours} 小時 ${minutes % 60} 分鐘` : `${hours} 小時`;
+}
+
+/**
+ * Tell someone the watcher itself is in trouble, or that it is back.
+ *
+ * Without this a blocked crawler and a quiet market look the same: no alerts.
+ *
+ * @param {'down'|'still-down'|'recovered'} alert
+ * @param {object} health the health being reported on — for `recovered`, the
+ *   one from just before the successful poll
+ * @param {object} config
+ * @param {{ now?: number }} [options]
+ */
+export function buildHealthPayload(alert, health, config, { now = Date.now() } = {}) {
+  const tz = config.daily.timeZone;
+  const detectedAt = new Date(now).toISOString();
+  const outage = formatSpan(now - Date.parse(health.firstFailureAt));
+  const base = {
+    source: 'd-reserve-jp',
+    event: 'health',
+    status: alert,
+    hotelCode: config.hotelCode,
+    detectedAt,
+    consecutiveFailures: health.consecutiveFailures,
+    firstFailureAt: health.firstFailureAt,
+    blocked: health.blocked,
+  };
+
+  if (alert === 'recovered') {
+    return {
+      ...base,
+      title: `✅ d-reserve-jp 已恢復，中斷 ${outage}`,
+      text:
+        `${formatClock(health.firstFailureAt, tz)} 起連續失敗 ${health.consecutiveFailures} 次，` +
+        '現在已能正常查詢。',
+    };
+  }
+
+  const why = health.blocked ? '（疑似被擋）' : '';
+  const lines = [
+    `首次失敗：${formatClock(health.firstFailureAt, tz)}（已 ${outage}）`,
+    `最後錯誤：${health.lastError}`,
+  ];
+  if (health.backoffUntil) lines.push(`下次嘗試：${formatClock(health.backoffUntil, tz)}`);
+  if (health.blocked) {
+    lines.push('', '若持續被擋，可拉長 DRESERVE_INTERVAL 或設定 DRESERVE_BACKOFF_BASE。');
+  }
+  lines.push('', '這段期間的空房不會被偵測到。');
+
+  return {
+    ...base,
+    lastError: health.lastError,
+    title:
+      `⚠️ d-reserve-jp ${alert === 'still-down' ? '仍在' : ''}連續失敗 ` +
+      `${health.consecutiveFailures} 次${why}`,
+    text: lines.join('\n'),
+  };
+}

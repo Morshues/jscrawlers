@@ -8,6 +8,7 @@ import {
   buildClosedPayloads,
   resolveAck,
   resolveCell,
+  buildHealthPayload,
 } from '../src/watch.js';
 
 function configWith(overrides = {}) {
@@ -293,4 +294,29 @@ test('a closed cell is described from whatever is still known about it', () => {
   const fallback = resolveCell(KEY, {}, {});
   assert.equal(fallback.roomCode, 'RM00010235');
   assert.equal(fallback.salesDate, '2026-10-09');
+});
+
+test('health payloads say how long and why', () => {
+  const config = configWith();
+  const now = Date.parse('2026-10-10T10:30:00Z');
+  const health = {
+    consecutiveFailures: 4,
+    firstFailureAt: '2026-10-10T10:00:00Z',
+    lastError: 'HTTP 429 Too Many Requests',
+    blocked: true,
+    backoffUntil: '2026-10-10T10:38:00Z',
+  };
+
+  const down = buildHealthPayload('down', health, config, { now });
+  assert.equal(down.event, 'health');
+  assert.equal(down.status, 'down');
+  assert.match(down.title, /連續失敗 4 次（疑似被擋）/);
+  assert.match(down.text, /30 分鐘/);
+  assert.match(down.text, /HTTP 429/);
+  assert.match(down.text, /下次嘗試：10\/10 18:38/); // Asia/Taipei
+
+  assert.match(buildHealthPayload('still-down', health, config, { now }).title, /仍在連續失敗/);
+
+  const back = buildHealthPayload('recovered', health, config, { now });
+  assert.match(back.title, /已恢復，中斷 30 分鐘/);
 });

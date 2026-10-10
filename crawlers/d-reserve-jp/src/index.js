@@ -12,10 +12,12 @@ import {
   createNotifier,
   createInbox,
   pollLoop,
+  trackHealth,
+  backoffRemaining,
 } from '@jscrawlers/core';
 
 import { loadConfig, parseDuration } from './config.js';
-import { fetchSnapshot } from './api.js';
+import { fetchSnapshot, classifyError } from './api.js';
 import { diffSnapshots } from './diff.js';
 import {
   selectNotifications,
@@ -23,6 +25,7 @@ import {
   buildClosedPayloads,
   resolveAck,
   resolveCell,
+  buildHealthPayload,
 } from './watch.js';
 import { readHistory, buildReport, formatReport } from './report.js';
 import { pendingWindows, summarizeWindow, buildSummaryPayloads } from './daily-summary.js';
@@ -103,28 +106,65 @@ async function pendingAcks(state) {
 }
 
 /**
+ * Fold one poll's outcome into the failure bookkeeping and say so out loud when
+ * it crosses a line. Returns the health to persist.
+ */
+async function updateHealth({ state, outcome, config, log, signal, notifyHealth }) {
+  const now = Date.now();
+  const { health, alert } = trackHealth(state.health, outcome, { now, ...config.health });
+  if (alert) {
+    // A recovery reports on the outage that just ended, which only the old
+    // health still describes.
+    const subject = alert === 'recovered' ? state.health : health;
+    const payload = buildHealthPayload(alert, subject, config, { now });
+    log[alert === 'recovered' ? 'info' : 'warn'](payload.title);
+    await notifyHealth(payload, { signal });
+  }
+  return health;
+}
+
+/**
  * One full cycle: fetch, diff against the stored snapshot, persist the changes,
  * then decide whether anything is worth a notification.
  *
  * The two phases deliberately share a single fetch — running them separately
  * would double the request rate and let them disagree about the same minute.
  */
-async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
+async function pollOnce({ config, log, signal, notify, notifyHealth, inbox, dryRun }) {
   const startedAt = Date.now();
   const state = (await readJson(NAME, STATE_FILE)) ?? {};
   const untilAck = config.notify.mode === 'until-ack';
+
+  // The pause lives in state.json rather than in memory so a launchd job, one
+  // process per poll, honours it just like the resident loop does.
+  const pauseMs = backoffRemaining(state.health);
+  if (pauseMs > 0 && !dryRun) {
+    log.warn(
+      `退避中，略過本輪（連續失敗 ${state.health.consecutiveFailures} 次，` +
+        `${Math.ceil(pauseMs / 1000)}s 後再試）`,
+    );
+    return { skipped: true, pauseMs };
+  }
 
   let snapshot;
   try {
     snapshot = await fetchSnapshot(config, { logger: log, signal });
   } catch (error) {
-    if (!dryRun) {
+    // Ctrl-C mid-request is not the site failing.
+    if (!dryRun && !signal.aborted) {
+      const outcome = classifyError(error);
       await appendJsonl(NAME, 'polls.jsonl', {
         ts: new Date().toISOString(),
         ok: false,
         durationMs: Date.now() - startedAt,
         error: error.message,
+        blocked: outcome.blocked,
+        status: outcome.status,
       });
+      // Only the health moves: the cells and alert bookkeeping still describe
+      // the last poll that actually saw the calendar.
+      const health = await updateHealth({ state, outcome, config, log, signal, notifyHealth });
+      await saveJson(NAME, STATE_FILE, { ...state, health });
     }
     throw error;
   }
@@ -197,6 +237,10 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
     await appendJsonl(NAME, eventsFile(snapshot.fetchedAt), events);
   }
 
+  // A good poll clears the failure bookkeeping. Announcing the all-clear waits
+  // until after the booker handoff, which cannot afford a Telegram round trip.
+  const recovered = Boolean(state.health?.alertedAt);
+
   await saveJson(NAME, STATE_FILE, {
     hotelCode: config.hotelCode,
     range: { from: config.fromDate, to: config.toDate },
@@ -207,6 +251,7 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
     notified,
     ackCursor: cursor,
     inbox: inboxState,
+    health: null,
   });
 
   await appendJsonl(NAME, 'polls.jsonl', {
@@ -244,6 +289,10 @@ async function pollOnce({ config, log, signal, notify, inbox, dryRun }) {
     );
   } else if (handoff) {
     log.info(`訂房機未受理：${handoff.reason}`);
+  }
+
+  if (recovered) {
+    await updateHealth({ state, outcome: { ok: true }, config, log, signal, notifyHealth });
   }
 
   // The first run has no baseline, so it cannot tell "just released" from "open
@@ -439,6 +488,11 @@ await runCrawler(NAME, async ({ log, signal }) => {
   }
 
   const notify = createNotifier({ channels: config.notify.channels, logger: log });
+  // Falls back like the digest does, so one channel list covers everything.
+  const notifyHealth = createNotifier({
+    channels: config.health.channels.length > 0 ? config.health.channels : config.notify.channels,
+    logger: log,
+  });
   const inbox =
     config.notify.ackChannels.length > 0
       ? createInbox({ channels: config.notify.ackChannels, logger: log })
@@ -484,13 +538,15 @@ await runCrawler(NAME, async ({ log, signal }) => {
     ? parseDuration(values.interval, '--interval')
     : config.poll.intervalMs;
 
-  if (!values.interval) return pollOnce({ config, log, signal, notify, inbox, dryRun });
+  const poll = () => pollOnce({ config, log, signal, notify, notifyHealth, inbox, dryRun });
+  if (!values.interval) return poll();
 
   // Resident mode. A single failed poll must not end the watch — the next one
   // may well be the release we are waiting for.
   return pollLoop({
-    task: () => pollOnce({ config, log, signal, notify, inbox, dryRun }),
+    task: poll,
     intervalMs,
+    jitterRatio: config.poll.jitterRatio,
     signal,
     logger: log,
   });

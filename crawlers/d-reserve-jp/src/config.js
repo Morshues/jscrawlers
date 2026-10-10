@@ -131,6 +131,13 @@ export function loadConfig(env = process.env) {
 
   const maxPrice = read.optional('DRESERVE_WATCH_MAX_PRICE');
 
+  const jitterRatio = read.number('DRESERVE_INTERVAL_JITTER', 0.2);
+  if (jitterRatio < 0 || jitterRatio >= 1) {
+    throw new Error(
+      `DRESERVE_INTERVAL_JITTER must be at least 0 and below 1, got "${jitterRatio}"`,
+    );
+  }
+
   const channels = read.list('DRESERVE_NOTIFY_CHANNELS');
   const cooldownMin = read.number('DRESERVE_NOTIFY_COOLDOWN_MIN', 0);
   const declaredMode = read.optional('DRESERVE_NOTIFY_MODE');
@@ -179,6 +186,21 @@ export function loadConfig(env = process.env) {
       requestDelayMs: read.number('DRESERVE_REQUEST_DELAY_MS', 1500),
       keepRaw: read.bool('DRESERVE_KEEP_RAW', false),
       rawKeep: read.number('DRESERVE_RAW_KEEP', 48),
+      // Resident mode only; launchd's StartInterval cannot be spread.
+      jitterRatio,
+      // Retries inside one poll. At a short interval the next poll is the
+      // retry, and hammering a 429 within the same minute is how a rate limit
+      // becomes a ban.
+      httpRetries: read.integer('DRESERVE_HTTP_RETRIES', 3, { min: 0, max: 10 }),
+    },
+
+    // When failing polls are worth a message, and how far to back off.
+    health: {
+      alertAfter: read.integer('DRESERVE_HEALTH_ALERT_AFTER', 3, { min: 1 }),
+      repeatMs: read.duration('DRESERVE_HEALTH_REPEAT', '1h'),
+      channels: read.list('DRESERVE_HEALTH_CHANNELS'),
+      backoffBaseMs: read.duration('DRESERVE_BACKOFF_BASE', '0'),
+      backoffMaxMs: read.duration('DRESERVE_BACKOFF_MAX', '30m'),
     },
 
     // Every field is optional; an empty one simply does not narrow the match.

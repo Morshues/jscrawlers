@@ -14,6 +14,22 @@ export class HttpError extends Error {
     this.status = response.status;
     this.url = url;
     this.response = response;
+    // How long the server asked us to stay away, when it said (429/503).
+    this.retryAfterMs = retryAfterMs(response);
+  }
+}
+
+/**
+ * A 200 whose body is not the JSON we asked for. Behind a WAF this is usually a
+ * challenge or block page, which a bare SyntaxError would hide.
+ */
+export class NotJsonError extends Error {
+  constructor(text, url, contentType) {
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+    super(`expected JSON from ${url}, got ${contentType || 'no content-type'}: ${snippet}`);
+    this.name = 'NotJsonError';
+    this.url = url;
+    this.snippet = snippet;
   }
 }
 
@@ -100,11 +116,16 @@ export async function fetchText(url, options) {
   return response.text();
 }
 
-/** fetchWithRetry + `.json()`, with a JSON Accept header. */
+/** fetchWithRetry + JSON parsing, with a JSON Accept header. Throws NotJsonError otherwise. */
 export async function fetchJson(url, options = {}) {
   const response = await fetchWithRetry(url, {
     ...options,
     headers: { accept: 'application/json', ...options.headers },
   });
-  return response.json();
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new NotJsonError(text, url, response.headers.get('content-type'));
+  }
 }

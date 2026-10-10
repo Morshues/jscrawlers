@@ -169,3 +169,35 @@ test('Telegram only listens for /stop when it is a channel and the mode nags', (
   const onceMode = loadConfig({ ...BASE_ENV, DRESERVE_NOTIFY_CHANNELS: 'telegram' });
   assert.deepEqual(onceMode.notify.ackChannels, [], 'nothing to stop in once mode');
 });
+
+test('health and pacing knobs have safe defaults', () => {
+  const config = loadConfig(BASE_ENV);
+  assert.equal(config.poll.jitterRatio, 0.2);
+  assert.equal(config.poll.httpRetries, 3);
+  assert.deepEqual(config.health, {
+    alertAfter: 3,
+    repeatMs: 3_600_000,
+    channels: [],
+    backoffBaseMs: 0,
+    backoffMaxMs: 1_800_000,
+  });
+});
+
+test('health and pacing knobs are read and validated', () => {
+  const config = loadConfig({
+    ...BASE_ENV,
+    DRESERVE_INTERVAL_JITTER: '0',
+    DRESERVE_HTTP_RETRIES: '1',
+    DRESERVE_HEALTH_ALERT_AFTER: '5',
+    DRESERVE_HEALTH_CHANNELS: 'telegram',
+    DRESERVE_BACKOFF_BASE: '2m',
+  });
+  assert.equal(config.poll.jitterRatio, 0);
+  assert.equal(config.poll.httpRetries, 1);
+  assert.equal(config.health.alertAfter, 5);
+  assert.deepEqual(config.health.channels, ['telegram']);
+  assert.equal(config.health.backoffBaseMs, 120_000);
+
+  assert.throws(() => loadConfig({ ...BASE_ENV, DRESERVE_INTERVAL_JITTER: '1.5' }), /JITTER/);
+  assert.throws(() => loadConfig({ ...BASE_ENV, DRESERVE_HEALTH_ALERT_AFTER: '0' }), /ALERT_AFTER/);
+});

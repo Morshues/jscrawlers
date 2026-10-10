@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { fetchJson, fetchText, fetchWithRetry, HttpError } from '../src/http.js';
+import { fetchJson, fetchText, fetchWithRetry, HttpError, NotJsonError } from '../src/http.js';
 
 /** Start a throwaway server whose handler is swapped per test. */
 async function serve(handler) {
@@ -83,6 +83,41 @@ test('gives up after the configured retries', async () => {
   });
   try {
     await assert.rejects(fetchWithRetry(s.url, { retries: 1, retryDelay: 10 }), HttpError);
+  } finally {
+    await s.close();
+  }
+});
+
+test('a non-JSON body (e.g. a WAF challenge page) throws NotJsonError with a snippet', async () => {
+  const s = await serve((_req, res) => {
+    res.setHeader('content-type', 'text/html');
+    res.end('<html><title>Just a moment...</title></html>');
+  });
+  try {
+    await assert.rejects(fetchJson(s.url), (error) => {
+      assert.ok(error instanceof NotJsonError);
+      assert.match(error.message, /text\/html/);
+      assert.match(error.snippet, /Just a moment/);
+      return true;
+    });
+  } finally {
+    await s.close();
+  }
+});
+
+test('HttpError carries the Retry-After the server asked for', async () => {
+  const s = await serve((_req, res) => {
+    res.statusCode = 429;
+    res.setHeader('retry-after', '0');
+    res.end('slow down');
+  });
+  try {
+    await assert.rejects(fetchText(s.url, { retries: 0 }), (error) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.status, 429);
+      assert.equal(error.retryAfterMs, 0);
+      return true;
+    });
   } finally {
     await s.close();
   }
