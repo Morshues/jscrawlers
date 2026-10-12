@@ -1,0 +1,62 @@
+<!-- Trimmed from a real checkout_order.php (2026-10); personal data replaced. -->
+<html><head><script>
+jQuery(function () {
+buyPart.checkoutOrder.initData({"name":"王小明","email":"someone@example.com","telCity":"","tel":null,"cell":"0900000000","sms":"1","invoice":"3","ship":"1","shipHome":["100台北市中正區某路1號","100","台北市","某路1號","中正區"],"payway":"2","invoiceInfo":{},"store":{"1":{"id":"123456","title":"某門市","address":"台北市"},"2":{"id":"009999","title":"某全家","address":"台北市"}}});
+buyPart.checkoutOrder.recipients();
+buyPart.checkoutOrder.invoice();
+buyPart.checkoutOrder.ship();
+
+reflashPaywayList();
+});
+</script></head><body>
+<div id="row43077" data-sn="43077" data-tag="1" class="products-info-list order-product-detail">
+<div class="list-gamename">
+<p>《女神異聞錄 4 Revival》中文一般版</p>
+</div>
+<div class="list-status">熱烈預購中</div>
+<div class="list-price">1990元</div>
+<div class="list-number" name="itemList" data-title="《女神異聞錄 4 Revival》中文一般版" data-platform="NS2" data-shipway="7" data-sn="43077">
+<div class="btn-reduce-products-number">
+<p>-</p>
+</div>
+<p class="product-num" data-limited="3" data-sn="43077" data-price="1990">1</p>
+</div>
+</div>
+<div class="total-bonus" id="bonusTotal" data-bonus="32">
+<span id="amountpaid" data-grandtotal="1990">1990</span>
+<span id="js-ship-edit"></span>
+<div id="js-ship"  data-ship="7" data-variety="1"></div>
+<div class="checkout-payway-area">
+<input type="hidden" name="payway_method" value="1">
+<h3>付款方式</h3>
+<div>
+<div class="checkout-payway-radio-group">
+<label class="checkout-radio">
+<input type="radio" name="payway" value="1" onchange="reflashPaywayList()" >
+<span class="checkout-mark"></span>
+貨到付款
+</label>
+<label class="checkout-radio">
+<input type="radio" name="payway" value="2" onchange="reflashPaywayList()" checked>
+<span class="checkout-mark"></span>
+信用卡付款（將前往刷卡頁面結帳）
+</label>
+</div>
+</div>
+<div class="payway-check-list-container">
+<!-- ajax刷新 -->
+</div>
+</div>
+<div class="btn-submit-area">
+<a href="javascript:void(0)" onclick="buyPart.checkoutOrder.validateForm(&quot;&quot;)" class="btn-checkout-submit">送出訂單</a>
+</div>
+<form name="frm0115" method="POST" action="checkout_order_action.php" style="display:none;">
+<div id="bonus-container"></div>
+<div id="payway-container"></div>
+<textarea name="memo" style="display:none;"></textarea>
+<div id="shipXXX"></div>
+<input type="hidden" name="shiptime" value="">
+<input type="hidden" name="source" value="normal">
+<input type="hidden" name="token" value="0123456789abcdef0123456789abcdef0123456789abcdef01234567">
+</form>
+</body></html>

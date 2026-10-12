@@ -17,6 +17,7 @@ export {
   outputDir,
   repoRoot,
 } from './store.js';
+export { createCookieJar, requestWithCookies } from './cookies.js';
 export { runCrawler } from './runner.js';
 export { parseArgs } from './args.js';
 export { createEnvReader } from './env.js';

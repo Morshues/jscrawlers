@@ -17,78 +17,24 @@
  * posting (reserve.bundle.js `Oc`, chunk 119 `entry`).
  */
 
+import { createCookieJar, requestWithCookies } from '@jscrawlers/core';
+
 const CONTEXT = '/guest-reserve-front';
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-const MAX_REDIRECTS = 10;
 
-/**
- * Just enough of a cookie jar for one host. Keycloak and the booking front end
- * both live on d-reserve.jp, so cookies are keyed by name alone; sending a
- * /auth-scoped cookie to /guest-reserve-front is harmless.
- */
-export function createCookieJar() {
-  const cookies = new Map();
-  return {
-    store(response) {
-      for (const line of response.headers.getSetCookie()) {
-        const [pair, ...attributes] = line.split(';');
-        const eq = pair.indexOf('=');
-        if (eq < 0) continue;
-        const name = pair.slice(0, eq).trim();
-        const value = pair.slice(eq + 1).trim();
-        const expired = attributes.some((attribute) => {
-          const [key, raw] = attribute.split('=').map((part) => part?.trim());
-          if (/^max-age$/i.test(key)) return Number(raw) <= 0;
-          if (/^expires$/i.test(key)) return Date.parse(raw) < Date.now();
-          return false;
-        });
-        if (expired) cookies.delete(name);
-        else cookies.set(name, value);
-      }
-    },
-    header() {
-      return [...cookies].map(([name, value]) => `${name}=${value}`).join('; ');
-    },
-    names() {
-      return [...cookies.keys()];
-    },
-  };
-}
+export { createCookieJar };
 
-/**
- * fetch() that carries the jar and follows redirects by hand: with
- * `redirect: 'follow'` the Set-Cookie headers of every intermediate hop are
- * lost, and the Keycloak handshake is nothing but intermediate hops.
- */
-async function request(jar, url, { method = 'GET', headers = {}, body, logger, signal } = {}) {
-  let current = url;
-  let init = { method, body };
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    logger?.debug(`${init.method} ${current.split('?')[0]}`);
-    const response = await fetch(current, {
-      ...init,
-      redirect: 'manual',
-      signal,
-      headers: {
-        'user-agent': USER_AGENT,
-        'accept-language': 'zh-TW,zh;q=0.9,ja;q=0.8,en;q=0.7',
-        ...headers,
-        cookie: jar.header(),
-      },
-    });
-    jar.store(response);
-
-    const location = response.headers.get('location');
-    if (response.status < 300 || response.status >= 400 || !location) {
-      return { response, url: current };
-    }
-    await response.body?.cancel();
-    current = new URL(location, current).href;
-    // 307/308 would replay the body; nothing on this path uses them.
-    init = { method: 'GET' };
-  }
-  throw new Error(`too many redirects starting from ${url.split('?')[0]}`);
+/** core's requestWithCookies with this site's browser-ish headers. */
+function request(jar, url, { headers = {}, ...options } = {}) {
+  return requestWithCookies(jar, url, {
+    ...options,
+    headers: {
+      'user-agent': USER_AGENT,
+      'accept-language': 'zh-TW,zh;q=0.9,ja;q=0.8,en;q=0.7',
+      ...headers,
+    },
+  });
 }
 
 export function bookingPageUrl(config, { roomCode, planCode, date }) {

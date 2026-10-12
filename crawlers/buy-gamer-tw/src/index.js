@@ -12,19 +12,71 @@ import {
   pollLoop,
 } from '@jscrawlers/core';
 
-import { loadConfig, parseDuration } from './config.js';
+import { loadConfig, loadOrderConfig, parseDuration, parseItems } from './config.js';
 import { fetchSnapshot } from './item.js';
 import { diffItems } from './diff.js';
 import { selectAlerts, buildPayloads } from './watch.js';
+import { privatePaths, readOrderEnv } from './private.js';
+import { login } from './session.js';
+import { placeOrder, buildOrderPayload, clearLock } from './orderer.js';
 
 const NAME = 'buy-gamer-tw';
 const STATE_FILE = 'state.json';
 
-const { values } = parseArgs({
+const FLAGS = {
   interval: { type: 'string' }, // "5m" -> stay resident; absent -> one shot
   'dry-run': { type: 'boolean', default: false },
   'notify-test': { type: 'boolean', default: false },
-});
+  order: { type: 'string' }, // sn or URL: order it once, now
+  'order-recon': { type: 'string' }, // sn or URL: cart it and save the checkout pages
+  'order-reset': { type: 'string' }, // sn: allow ordering it again
+  'login-test': { type: 'boolean', default: false },
+};
+const { values } = parseArgs(FLAGS);
+
+// core's parseArgs is lenient, so a typo (or a stray full-width comma after
+// --login-test) would otherwise fall through to a watch run that orders things.
+const unknown = Object.keys(values).filter((flag) => !(flag in FLAGS));
+if (unknown.length > 0) {
+  console.error(`[${NAME}] 未知參數：${unknown.map((flag) => `--${flag}`).join(' ')}`);
+  console.error(
+    `[${NAME}] 可用：${Object.keys(FLAGS)
+      .map((flag) => `--${flag}`)
+      .join(' ')}`,
+  );
+  process.exit(2);
+}
+
+/** The private half of ordering: paths outside the repo + the order env file. */
+function loadOrderContext() {
+  const paths = privatePaths();
+  return { paths, order: loadOrderConfig(readOrderEnv(paths.envFile)) };
+}
+
+function logOrderResult(result, log) {
+  const name = `${result.sn} ${result.title ?? ''}`.trim();
+  const how = `NT ${result.total ?? result.price}・${result.payment ?? ''}・${result.ship ?? ''}`;
+  switch (result.status) {
+    case 'submitted':
+      log.warn(`已下單：${name}（${how}）訂單編號 ${result.orderNumber ?? '未讀到'}`);
+      break;
+    case 'ready':
+      log.warn(`確認訂單資料無誤，未送出：${name}（${how}）`);
+      if (!result.recon) log.warn('  BUYGAMER_ORDER_SUBMIT=false — 改成 true 才會真的送出');
+      break;
+    case 'locked':
+      log.info(
+        `${name} 已在 ${result.lock.finishedAt} 下過單，略過（--order-reset ${result.sn} 解除）`,
+      );
+      break;
+    case 'submit-unknown':
+      log.error(`訂單已送出但結果不明：${name}：${result.error}（請到商城確認）`);
+      break;
+    default:
+      log.error(`自動下單失敗：${name}：${result.error}`);
+  }
+  for (const file of result.savedPages ?? []) log.info(`  頁面已存：${file}`);
+}
 
 /** Events are sharded by month so no single file grows without bound. */
 function eventsFile(ts) {
@@ -48,7 +100,7 @@ async function pruneRaw(keep, log) {
  * One full cycle: fetch every watched product, diff against what is stored,
  * persist the changes, then decide whether anything is worth a notification.
  */
-async function pollOnce({ config, log, signal, notify, dryRun }) {
+async function pollOnce({ config, log, signal, notify, dryRun, orderCtx }) {
   const startedAt = Date.now();
   const state = (await readJson(NAME, STATE_FILE)) ?? {};
   const previous = state.items ?? {};
@@ -95,6 +147,10 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     for (const payload of buildPayloads(fresh, config))
       log.info(`[dry-run] 將發出通知：\n${payload.title}\n${payload.text}`);
     if (fresh.length === 0) log.info('[dry-run] 沒有需要通知的商品');
+    if (orderCtx) {
+      for (const item of fresh.filter((i) => !config.order.items || config.order.items.has(i.sn)))
+        log.info(`[dry-run] 將自動下單：${item.sn} ${item.title}`);
+    }
     return { snapshot, events, buyable, fresh, notified: false };
   }
 
@@ -138,6 +194,18 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
     log.info('若想連這些也收到通知，設定 BUYGAMER_NOTIFY_ON_FIRST_RUN=true');
   }
 
+  // Ordering goes before the notification: when a restock lasts minutes, the
+  // second a notify call takes is better spent at the checkout.
+  if (orderCtx) {
+    for (const item of fresh) {
+      if (config.order.items && !config.order.items.has(item.sn)) continue;
+      log.warn(`自動下單：${item.sn} ${item.title}`);
+      const result = await placeOrder(item, { ...orderCtx, config, logger: log, signal });
+      logOrderResult(result, log);
+      if (result.status !== 'locked') await notify(buildOrderPayload(result), { signal });
+    }
+  }
+
   // A notification failure must never abort the run: the history is the part we
   // cannot reconstruct later, and it is already safely on disk by this point.
   for (const payload of buildPayloads(fresh, config, { detectedAt: snapshot.fetchedAt })) {
@@ -149,7 +217,13 @@ async function pollOnce({ config, log, signal, notify, dryRun }) {
 }
 
 await runCrawler(NAME, async ({ log, signal }) => {
-  const config = loadConfig();
+  const watching = !(
+    values['login-test'] ||
+    values['order-reset'] ||
+    values.order ||
+    values['order-recon']
+  );
+  const config = loadConfig(process.env, { watching });
   const notify = createNotifier({ channels: config.notify.channels, logger: log });
 
   if (values['notify-test']) {
@@ -169,19 +243,62 @@ await runCrawler(NAME, async ({ log, signal }) => {
     return results;
   }
 
+  if (values['login-test']) {
+    const { paths, order } = loadOrderContext();
+    const { via, cart } = await login(order, paths, {
+      baseUrl: config.baseUrl,
+      logger: log,
+      signal,
+    });
+    log.info(
+      `登入成功（${via}），購物車 ${cart.items.length} 件商品，session 存在 ${paths.sessionFile}`,
+    );
+    for (const entry of cart.items) log.info(`  ${entry.sn} ×${entry.qty} ${entry.title}`);
+    return { via, cart };
+  }
+
+  if (values['order-reset']) {
+    const [{ sn }] = parseItems(values['order-reset'], config.baseUrl, '--order-reset');
+    clearLock(privatePaths(), sn);
+    log.info(`sn=${sn} 可以再次自動下單`);
+    return { sn };
+  }
+
+  const manual = values.order ?? values['order-recon'];
+  if (manual) {
+    const recon = values.order === undefined;
+    const flag = recon ? '--order-recon' : '--order';
+    const [item] = parseItems(manual, config.baseUrl, flag);
+    const orderCtx = loadOrderContext();
+    const result = await placeOrder(item, { ...orderCtx, config, logger: log, signal, recon });
+    logOrderResult(result, log);
+    if (!recon && result.status !== 'locked') await notify(buildOrderPayload(result), { signal });
+    if (result.status === 'failed') process.exitCode = 1;
+    return result;
+  }
+
   const dryRun = values['dry-run'];
+  // Read up front, so a missing or world-readable order env fails the first
+  // run rather than the restock.
+  const orderCtx = config.order.enabled ? loadOrderContext() : null;
+  if (orderCtx) {
+    log.info(
+      `自動下單已啟用（上限 NT ${orderCtx.order.maxPrice}` +
+        `${config.order.items ? `，限 ${[...config.order.items].join(', ')}` : ''}）`,
+    );
+  }
   log.info(`監看 ${config.items.map((item) => item.sn).join(', ')}`);
 
   const intervalMs = values.interval
     ? parseDuration(values.interval, '--interval')
     : config.poll.intervalMs;
 
-  if (!values.interval) return pollOnce({ config, log, signal, notify, dryRun });
+  if (!values.interval) return pollOnce({ config, log, signal, notify, dryRun, orderCtx });
 
   // Resident mode. A single failed poll must not end the watch — the next one
   // may well be the restock we are waiting for.
   return pollLoop({
-    task: () => pollOnce({ config, log, signal, notify, dryRun }),
+    task: () => pollOnce({ config, log, signal, notify, dryRun, orderCtx }),
     intervalMs,
     signal,
     logger: log,

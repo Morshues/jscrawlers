@@ -79,14 +79,17 @@ function snFromUrl(value, entry, key) {
  * silently watching nothing.
  *
  * @param {Record<string, string | undefined>} [env]
+ * @param {{ watching?: boolean }} [options] false for commands that never poll
+ *   (--login-test, --order ...), which have no use for a watch list
  */
-export function loadConfig(env = process.env) {
+export function loadConfig(env = process.env, { watching = true } = {}) {
   const read = createEnvReader(env);
   const baseUrl = read.optional('BUYGAMER_BASE_URL', 'https://buy.gamer.com.tw');
+  const itemSpec = read.optional('BUYGAMER_ITEMS');
 
   return {
     baseUrl,
-    items: parseItems(read.optional('BUYGAMER_ITEMS'), baseUrl),
+    items: watching || itemSpec ? parseItems(itemSpec, baseUrl) : [],
 
     poll: {
       intervalMs: read.duration('BUYGAMER_INTERVAL', '5m'),
@@ -109,5 +112,53 @@ export function loadConfig(env = process.env) {
       grouped: read.bool('BUYGAMER_NOTIFY_GROUPED', true),
       onFirstRun: read.bool('BUYGAMER_NOTIFY_ON_FIRST_RUN', false),
     },
+
+    // Only the switch and the allow-list live in the repo .env; the login and
+    // the price cap are in the private order env (loadOrderConfig).
+    order: {
+      enabled: read.bool('BUYGAMER_ORDER_ENABLED', false),
+      // Blank = every watched product may be ordered.
+      items: parseOrderItems(read.optional('BUYGAMER_ORDER_ITEMS'), baseUrl),
+    },
+  };
+}
+
+function parseOrderItems(spec, baseUrl) {
+  if (!spec.trim()) return null;
+  return new Set(parseItems(spec, baseUrl, 'BUYGAMER_ORDER_ITEMS').map((item) => item.sn));
+}
+
+/**
+ * The private half of ordering, read from the order env file (see private.js),
+ * never from the repo `.env`.
+ *
+ * @param {Record<string, string | undefined>} secrets parsed order env file
+ */
+export function loadOrderConfig(secrets) {
+  const read = createEnvReader(secrets);
+
+  const user = read.optional('BUYGAMER_LOGIN_USER');
+  const password = read.optional('BUYGAMER_LOGIN_PASSWORD');
+  const cookies = read.optional('BUYGAMER_COOKIES');
+  if (!cookies && !(user && password)) {
+    throw new Error(
+      'order env needs BUYGAMER_LOGIN_USER + BUYGAMER_LOGIN_PASSWORD, or BUYGAMER_COOKIES ' +
+        '(BAHAID=...; BAHARUNE=...; BAHAENUR=... copied from a logged-in browser)',
+    );
+  }
+
+  // Required: an uncapped auto-buyer is never what anyone meant.
+  const maxPrice = Number(read.required('BUYGAMER_ORDER_MAX_PRICE'));
+  if (!(maxPrice > 0)) {
+    throw new Error('BUYGAMER_ORDER_MAX_PRICE must be a positive number of NT dollars');
+  }
+
+  return {
+    user,
+    password,
+    cookies,
+    maxPrice,
+    // Off until you have watched it stop at the confirmation page once.
+    submit: read.bool('BUYGAMER_ORDER_SUBMIT', false),
   };
 }
