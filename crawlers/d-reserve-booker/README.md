@@ -20,7 +20,7 @@ an agent with a shell in your account can read your own `~/.config`.
  ┌──────────────────────────┐   signed    ┌────────────────────────────────────┐
  │ d-reserve-jp             │POST /bookings d-reserve-booker --serve           │
  │  calendar → matches ─────┼────────────▶│  policy: dates, rooms, price cap   │
- │  knows: URL + secret     │◀────────────┼─ "accepted" / "locked" / ...       │
+ │  knows: URL + secret     │◀────────────┼─ "accepted" / "busy" / ...         │
  └──────────────────────────┘  yes / no   │  login → booking page → entry      │
                                           │  → Telegram: ✅ 付款連結 / ❌ 原因   │
                                           └────────────────────────────────────┘
@@ -45,8 +45,7 @@ lives in the repo.
 Whoever holds `BOOKER_SECRET` can ask the booker to book. They cannot choose
 what it books: the cells in a request are only candidates, and the booker picks
 from them using **its own** `BOOKER_DATES`, `BOOKER_ROOM_CODES` and
-`BOOKER_MAX_PRICE`, books one at a time, and stops after one success until you
-run `--reset`. The total on the booking page is checked against the cap again
+`BOOKER_MAX_PRICE`, and books one at a time. The total on the booking page is checked against the cap again
 before anything is submitted. The answer to a request never contains the
 payment link, personal data or the site's error text.
 
@@ -63,10 +62,10 @@ or the site's error text.
 | Method | Path        | Body                          | Answer                                                                       |
 | ------ | ----------- | ----------------------------- | ---------------------------------------------------------------------------- |
 | POST   | `/bookings` | `{ hotelCode, cells: [...] }` | 202 `{ accepted: true, submit, target }` — attempt started in the background |
-|        |             |                               | 200 `{ accepted: false, reason }` — `locked`, `busy` or `no-eligible-cell`   |
+|        |             |                               | 200 `{ accepted: false, reason }` — `busy` or `no-eligible-cell`             |
 |        |             |                               | 400 wrong hotel / bad JSON, 401 signature, 413 body over 16 KB               |
 | POST   | `/book`     | same                          | alias of `/bookings` for older watchers                                      |
-| GET    | `/health`   | —                             | 200 `{ ok, locked, busy, submit }`                                           |
+| GET    | `/health`   | —                             | 200 `{ ok, busy, submit }`                                                   |
 
 A cell is `{ roomCode, salesDate, planCode, memberPrice, roomName? }`; anything
 else in it is dropped. Signing, for a client written in anything:
@@ -118,19 +117,18 @@ Always start through `src/main.js` — it loads the env file from your home
 directory. `npm run crawl d-reserve-booker` is refused on purpose: it would load
 the repo's `.env` instead.
 
-| Command                                              | What it does                                                   |
-| ---------------------------------------------------- | -------------------------------------------------------------- |
-| `node crawlers/d-reserve-booker/src/main.js --serve` | Listen for the watcher.                                        |
-| `… --book 2026-10-29 RM00010236 PL00028613`          | One attempt by hand, rehearsal only.                           |
-| `… --book … --confirm`                               | One attempt by hand that really submits.                       |
-| `… --status`                                         | Lock, in-flight attempt, attempt counts.                       |
-| `… --reset`                                          | Unlock and clear attempt counts after a booking is dealt with. |
+| Command                                              | What it does                              |
+| ---------------------------------------------------- | ----------------------------------------- |
+| `node crawlers/d-reserve-booker/src/main.js --serve` | Listen for the watcher.                   |
+| `… --book 2026-10-29 RM00010236 PL00028613`          | One attempt by hand, rehearsal only.      |
+| `… --book … --confirm`                               | One attempt by hand that really submits.  |
+| `… --status`                                         | In-flight attempt, failed-attempt counts. |
 
 ## Rehearsal first
 
 `BOOKER_SUBMIT=false` (the default) makes `--serve` accept requests, log in,
 build the whole booking and stop just before submitting, sending you
-`🧪 自動訂房演練（未送出）`. Rehearsals never lock or count as attempts. Leave it
+`🧪 自動訂房演練（未送出）`. Rehearsals never count as attempts. Leave it
 like that until one has come through end to end, then set `BOOKER_SUBMIT=true`
 and restart.
 
@@ -139,16 +137,17 @@ and restart.
 1. The booker logs in, opens the booking page for that room, plan and date,
    fills it from `booker.env`, and posts it (`reservation/entry`).
 2. On success you get `✅ 已送出訂房，請立即付款` with the JTB link. Open it on your
-   phone, pay (JPY, EEA: No, 3-D Secure yourself). The booker is now **locked**.
+   phone, pay (JPY, EEA: No, 3-D Secure yourself). The booker keeps accepting
+   requests: a submitted booking is not a purchase, so the next opening is
+   tried right away, the same room included.
 3. On failure you get `❌ 自動訂房失敗` with the reason; the room is retried on a
-   later poll, up to `BOOKER_MAX_ATTEMPTS`.
-4. Once you have paid (or cancelled), `--reset` to let it book again.
+   later poll, up to `BOOKER_MAX_ATTEMPTS` failures in a row.
 
 ## Files
 
 ```
 ~/.local/share/d-reserve-booker/d-reserve-booker/
-  booking-state.json      lock, attempt counts, what was booked
+  booking-state.json      failed-attempt counts, last booking submitted
   bookings.jsonl          one line per attempt (incl. rehearsals)
   booking/<stamp>-*.json  the exact payload sent and the site's answer
 ```

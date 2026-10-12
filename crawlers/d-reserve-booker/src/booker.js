@@ -57,16 +57,17 @@ export function createBooker({
         error: result.error ?? null,
       });
 
-      // A dry run neither counts as an attempt nor locks: it spent nothing.
+      // Only a failed submission counts against the cell; a successful one
+      // clears it, so the same room can be grabbed again the moment it
+      // reopens. A dry run spent nothing and counts for nothing.
       if (submit) {
         const state = await store.readState();
-        const attempts = { ...state.attempts, [key]: (state.attempts?.[key] ?? 0) + 1 };
+        const { [key]: previous = 0, ...others } = state.attempts ?? {};
+        const attempts = result.ok ? others : { ...others, [key]: previous + 1 };
         await store.saveState({
           ...state,
           attempts,
-          ...(result.ok
-            ? { locked: true, lockedAt: ts, booked: { key, nextUrl: result.nextUrl } }
-            : {}),
+          ...(result.ok ? { booked: { key, at: ts, nextUrl: result.nextUrl } } : {}),
         });
       }
     } catch (error) {
@@ -109,9 +110,7 @@ export function createBooker({
     idle: () => running ?? Promise.resolve(),
 
     async status() {
-      const state = await store.readState();
       return {
-        locked: Boolean(state.locked),
         busy: Boolean(running),
         submit: config.server.submit,
       };

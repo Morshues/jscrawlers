@@ -65,10 +65,3 @@ test('earliest date first, then the cheapest; spent cells are skipped', () => {
     dear,
   );
 });
-
-test('a lock refuses everything', () => {
-  assert.deepEqual(selectBookingTarget([cell()], { locked: true }, POLICY), {
-    target: null,
-    reason: 'locked',
-  });
-});

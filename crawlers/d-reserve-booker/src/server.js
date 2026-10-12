@@ -5,9 +5,9 @@ import { sanitizeCells } from './policy.js';
 /**
  *   POST /bookings   { hotelCode, cells: [{ roomCode, salesDate, planCode, memberPrice, roomName? }] }
  *                    202 { accepted: true, submit, target: { roomCode, salesDate } }
- *                    200 { accepted: false, reason: 'locked' | 'busy' | 'no-eligible-cell' }
+ *                    200 { accepted: false, reason: 'busy' | 'no-eligible-cell' }
  *   POST /book       alias of /bookings, for watchers deployed before the rename
- *   GET  /health     200 { ok: true, locked, busy, submit }
+ *   GET  /health     200 { ok: true, busy, submit }
  *
  * Every request, /health included, must be signed (core sign.js). Answers carry
  * decisions only — no payment link, no personal data, no error text from the

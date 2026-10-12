@@ -155,20 +155,22 @@ test('an accepted request answers the decision only, then books in the backgroun
   await ctx.booker.idle();
   assert.equal(ctx.calls.length, 1);
   assert.equal(ctx.calls[0].options.dryRun, false);
-  assert.equal(ctx.store.peek().locked, true);
   assert.match(ctx.notified[0].text, /secret-token/); // the link goes to the person, not the caller
-
-  const after = await ctx.call('POST', '/bookings', { hotelCode: '0000001834', cells: [CELL] });
-  assert.deepEqual(after.body, { accepted: false, reason: 'locked' });
   assert.deepEqual((await ctx.call('GET', '/health')).body, {
     ok: true,
-    locked: true,
     busy: false,
     submit: true,
   });
+
+  // Submitting is not buying: the next request is taken at once, same room included.
+  const after = await ctx.call('POST', '/bookings', { hotelCode: '0000001834', cells: [CELL] });
+  assert.equal(after.status, 202);
+  ctx.release();
+  await ctx.booker.idle();
+  assert.equal(ctx.calls.length, 2);
 });
 
-test('with BOOKER_SUBMIT=false it only rehearses and never locks', async (t) => {
+test('with BOOKER_SUBMIT=false it only rehearses and counts nothing', async (t) => {
   const ctx = await setup({ submit: false });
   t.after(ctx.close);
 
@@ -178,11 +180,11 @@ test('with BOOKER_SUBMIT=false it only rehearses and never locks', async (t) => 
   await ctx.booker.idle();
 
   assert.equal(ctx.calls[0].options.dryRun, true);
-  assert.equal(ctx.store.peek().locked, undefined);
+  assert.equal(ctx.store.peek().attempts, undefined);
   assert.match(ctx.notified[0].title, /演練/);
 });
 
-test('a failed submission counts an attempt, stays unlocked and reports the reason', async (t) => {
+test('a failed submission counts an attempt and reports the reason', async (t) => {
   const ctx = await setup({ result: { ok: false, submitted: true, error: 'HTTP 409: sold out' } });
   t.after(ctx.close);
 

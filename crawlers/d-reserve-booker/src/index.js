@@ -1,5 +1,5 @@
 import { once } from 'node:events';
-import { runCrawler, parseArgs, createNotifier, readJson, saveJson } from '@jscrawlers/core';
+import { runCrawler, parseArgs, createNotifier, readJson } from '@jscrawlers/core';
 
 import { loadConfig } from './config.js';
 import { createBooker, NAME } from './booker.js';
@@ -17,7 +17,6 @@ const { values, positionals } = parseArgs({
   serve: { type: 'boolean', default: false }, // listen for watcher requests
   book: { type: 'boolean', default: false }, // <date> <roomCode> <planCode>: one attempt by hand
   confirm: { type: 'boolean', default: false }, // --book really submits
-  reset: { type: 'boolean', default: false }, // unlock after a booking has been dealt with
   status: { type: 'boolean', default: false },
 });
 
@@ -37,13 +36,6 @@ async function serve({ config, booker, log, signal }) {
 }
 
 await runCrawler(NAME, async ({ log, signal }) => {
-  if (values.reset) {
-    const state = (await readJson(NAME, 'booking-state.json')) ?? {};
-    await saveJson(NAME, 'booking-state.json', { ...state, locked: false, attempts: {} });
-    log.info(`unlocked${state.booked ? ` (was ${state.booked.key})` : ''}; attempt counts cleared`);
-    return;
-  }
-
   const config = loadConfig(process.env, { serve: values.serve });
   const notify = createNotifier({ channels: config.notify.channels, logger: log });
   const booker = createBooker({ config, log, notify, signal });
@@ -71,5 +63,5 @@ await runCrawler(NAME, async ({ log, signal }) => {
 
   if (values.serve) return serve({ config, booker, log, signal });
 
-  throw new Error('nothing to do: pass --serve, --book, --status or --reset');
+  throw new Error('nothing to do: pass --serve, --book, or --status');
 });

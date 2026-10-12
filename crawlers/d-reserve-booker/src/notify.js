@@ -27,11 +27,7 @@ export function buildBookingPayload(cell, result, { submit }) {
     lines.push('登入與訂房資料都已就緒；BOOKER_SUBMIT=true 才會真的送出。');
   } else {
     title = `✅ 已送出訂房，請立即付款：${what}`;
-    lines.push(
-      `付款：${result.nextUrl}`,
-      '',
-      '付款完成後在訂房機上執行 --reset 才會再接受新的訂房。',
-    );
+    lines.push(`付款：${result.nextUrl}`);
   }
 
   return {

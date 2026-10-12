@@ -3,7 +3,7 @@
  *
  * Requests come from a watcher this machine does not trust with secrets, so
  * nothing in them is taken as permission. A cell is only booked when this
- * machine's own policy — dates, room codes, price cap, attempt limit, lock —
+ * machine's own policy — dates, room codes, price cap, attempt limit —
  * allows it. The worst a forged-but-validly-signed request can do is ask for a
  * booking the policy already approved.
  */
@@ -46,17 +46,15 @@ export function sanitizeCells(cells) {
 /**
  * The one cell to book now, or why not.
  *
- * Earliest date wins, then the cheapest. Once a booking went through the lock
- * stops everything until someone runs `--reset` on this machine.
+ * Earliest date wins, then the cheapest. A submitted booking does not stop the
+ * next one: submitting is not buying, and the next chance must not wait.
  *
  * @param {object[]} cells already sanitized
- * @param {{ locked?: boolean, attempts?: Record<string, number> }} state
+ * @param {{ attempts?: Record<string, number> }} state
  * @param {{ dates: Set<string>, roomCodes: Set<string>, maxPrice: number, maxAttempts: number }} policy
- * @returns {{ target: object } | { target: null, reason: 'locked' | 'no-eligible-cell' }}
+ * @returns {{ target: object } | { target: null, reason: 'no-eligible-cell' }}
  */
 export function selectBookingTarget(cells, state = {}, policy) {
-  if (state.locked) return { target: null, reason: 'locked' };
-
   const candidates = cells.filter(
     (cell) =>
       policy.dates.has(cell.salesDate) &&

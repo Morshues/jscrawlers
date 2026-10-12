@@ -223,7 +223,7 @@ request, before the alerts go out. The booker answers only yes or no:
 
 ```
 已交給訂房機：2026-10-29 RM00010236
-訂房機未受理：locked | busy | no-eligible-cell | unreachable (…)
+訂房機未受理：busy | no-eligible-cell | unreachable (…)
 ```
 
 An accepted hand-off adds `🤖 已交給訂房機` to that poll's alert. Whether the
