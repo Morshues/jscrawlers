@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { createSign } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { fetchWithRetry } from './http.js';
 
 /**
@@ -111,7 +113,116 @@ async function sendCommand(payload, { env, logger, signal }) {
   });
 }
 
-const CHANNELS = { webhook: sendWebhook, telegram: sendTelegram, command: sendCommand };
+const FCM_SCOPE = 'https://www.googleapis.com/auth/firebase.messaging';
+const GOOGLE_TOKEN_URI = 'https://oauth2.googleapis.com/token';
+
+/** Access tokens by service-account file, so a notification costs one request, not two. */
+const fcmTokens = new Map();
+
+function base64url(value) {
+  return Buffer.from(value).toString('base64url');
+}
+
+/**
+ * Trade a service account for an OAuth access token: a JWT signed with its
+ * private key, posted to its token_uri. This is what firebase-admin does, in
+ * the few lines this repo needs instead of the dependency.
+ */
+async function fcmAccessToken(file, { logger, signal }) {
+  const cached = fcmTokens.get(file);
+  // Refresh a minute early so a token never expires between here and FCM.
+  if (cached && cached.expiresAt - 60_000 > Date.now()) return cached;
+
+  const account = JSON.parse(await readFile(file, 'utf8'));
+  for (const key of ['client_email', 'private_key', 'project_id']) {
+    if (!account[key]) throw new Error(`FCM service account ${file} has no ${key}`);
+  }
+  const tokenUri = account.token_uri ?? GOOGLE_TOKEN_URI;
+
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))}.${base64url(
+    JSON.stringify({
+      iss: account.client_email,
+      scope: FCM_SCOPE,
+      aud: tokenUri,
+      iat: now,
+      exp: now + 3600,
+    }),
+  )}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(account.private_key);
+
+  const response = await fetchWithRetry(tokenUri, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: `${unsigned}.${signature.toString('base64url')}`,
+    }).toString(),
+    logger,
+    signal,
+  });
+  const { access_token: accessToken, expires_in: expiresIn = 3600 } = await response.json();
+  if (!accessToken) throw new Error(`no access_token from ${tokenUri}`);
+
+  const entry = {
+    accessToken,
+    projectId: account.project_id,
+    expiresAt: Date.now() + expiresIn * 1000,
+  };
+  fcmTokens.set(file, entry);
+  return entry;
+}
+
+/**
+ * Push the payload straight to an Android app as a high-priority FCM data
+ * message, so the app gets it in onMessageReceived without waiting on another
+ * app's notification. FCM data values must be strings; objects go as JSON.
+ */
+async function sendFcm(payload, { env, logger, signal }) {
+  const file = env.FCM_SERVICE_ACCOUNT_FILE;
+  const tokens = String(env.FCM_DEVICE_TOKEN ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (!file || tokens.length === 0)
+    throw new Error('FCM_SERVICE_ACCOUNT_FILE and FCM_DEVICE_TOKEN must both be set');
+
+  const { accessToken, projectId } = await fcmAccessToken(file, { logger, signal });
+  const data = {};
+  for (const [key, value] of Object.entries(payload)) {
+    if (value == null) continue;
+    data[key] = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  }
+
+  const base = env.FCM_API_BASE ?? 'https://fcm.googleapis.com';
+  const results = await Promise.allSettled(
+    tokens.map((token) =>
+      fetchWithRetry(`${base}/v1/projects/${projectId}/messages:send`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ message: { token, android: { priority: 'HIGH' }, data } }),
+        logger,
+        signal,
+      }),
+    ),
+  );
+  const failed = results.filter((result) => result.status === 'rejected');
+  if (failed.length > 0) {
+    throw new Error(
+      `${failed.length}/${tokens.length} FCM devices failed: ${failed[0].reason.message}`,
+    );
+  }
+}
+
+const CHANNELS = {
+  webhook: sendWebhook,
+  telegram: sendTelegram,
+  command: sendCommand,
+  fcm: sendFcm,
+};
 
 export const NOTIFY_CHANNELS = Object.keys(CHANNELS);
 

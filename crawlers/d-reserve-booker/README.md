@@ -22,7 +22,7 @@ an agent with a shell in your account can read your own `~/.config`.
  │  calendar → matches ─────┼────────────▶│  policy: dates, rooms, price cap   │
  │  knows: URL + secret     │◀────────────┼─ "accepted" / "busy" / ...         │
  └──────────────────────────┘  yes / no   │  login → booking page → entry      │
-                                          │  → Telegram: ✅ 付款連結 / ❌ 原因   │
+                                          │  → Telegram / FCM: ✅ 付款連結 / ❌  │
                                           └────────────────────────────────────┘
 ```
 
@@ -85,7 +85,7 @@ git clone … && cd jscrawlers && npm install
 mkdir -p ~/.config/d-reserve-booker
 cp crawlers/d-reserve-booker/booker.env.example ~/.config/d-reserve-booker/booker.env
 chmod 600 ~/.config/d-reserve-booker/booker.env
-$EDITOR ~/.config/d-reserve-booker/booker.env      # login, dates, cap, Telegram
+$EDITOR ~/.config/d-reserve-booker/booker.env      # login, dates, cap, Telegram/FCM
 openssl rand -hex 32                               # → BOOKER_SECRET here and
                                                    #   DRESERVE_BOOKER_SECRET on the watcher
 ```
@@ -93,6 +93,40 @@ openssl rand -hex 32                               # → BOOKER_SECRET here and
 Bind `BOOKER_LISTEN` to the machine's Tailscale (or LAN) address, never a public
 one, and set the watcher's `DRESERVE_BOOKER_URL` to it. If the watcher is on the
 same Mac, `127.0.0.1` is enough.
+
+### Push to an Android app (FCM)
+
+Telegram reaches the phone through the Telegram app; `fcm` pushes straight to
+your own app, which then does not have to read another app's notification. Add
+it next to Telegram, not instead of it — channels are sent in parallel and one
+failing never stops the other:
+
+```bash
+# Firebase console → Project settings → Service accounts → Generate new private key
+mv ~/Downloads/<project>-*.json ~/.config/d-reserve-booker/fcm-service-account.json
+chmod 600 ~/.config/d-reserve-booker/fcm-service-account.json
+```
+
+```
+BOOKER_NOTIFY_CHANNELS=telegram,fcm
+FCM_SERVICE_ACCOUNT_FILE=/Users/<you>/.config/d-reserve-booker/fcm-service-account.json
+FCM_DEVICE_TOKEN=<the app's registration token>
+```
+
+Each result goes to every token as a **high-priority data message** (no
+`notification` block), so it always reaches `onMessageReceived`, foreground or
+not. Its `data` holds `source`, `event` (`booking` / `booking-dry-run` /
+`booking-failed`), `title`, `text`, `detectedAt` and, after a submission, `url`
+— the payment page. On the app side:
+
+- log or show `FirebaseMessaging.getInstance().token` once, and paste it into
+  `FCM_DEVICE_TOKEN` (it changes on reinstall or cleared data);
+- `--test-notify booking` (or `dry-run`, `failed`) sends a sample in the real
+  format, with `[測試]` in the title, `test: "true"` in the data and a payment
+  `url` shaped like the real one (https://d-reserve.jp/guest-reserve-front/…);
+- post a visible notification for every message received — Android demotes
+  high-priority messages that never show one to normal priority, which Doze
+  can delay by minutes.
 
 ### Same Mac: a separate macOS user
 
@@ -117,12 +151,13 @@ Always start through `src/main.js` — it loads the env file from your home
 directory. `npm run crawl d-reserve-booker` is refused on purpose: it would load
 the repo's `.env` instead.
 
-| Command                                              | What it does                              |
-| ---------------------------------------------------- | ----------------------------------------- |
-| `node crawlers/d-reserve-booker/src/main.js --serve` | Listen for the watcher.                   |
-| `… --book 2026-10-29 RM00010236 PL00028613`          | One attempt by hand, rehearsal only.      |
-| `… --book … --confirm`                               | One attempt by hand that really submits.  |
-| `… --status`                                         | In-flight attempt, failed-attempt counts. |
+| Command                                              | What it does                                 |
+| ---------------------------------------------------- | -------------------------------------------- |
+| `node crawlers/d-reserve-booker/src/main.js --serve` | Listen for the watcher.                      |
+| `… --book 2026-10-29 RM00010236 PL00028613`          | One attempt by hand, rehearsal only.         |
+| `… --book … --confirm`                               | One attempt by hand that really submits.     |
+| `… --status`                                         | In-flight attempt, failed-attempt counts.    |
+| `… --test-notify booking`                            | Sample notice on every channel, real format. |
 
 ## Rehearsal first
 

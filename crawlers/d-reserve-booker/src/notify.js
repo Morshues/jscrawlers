@@ -35,6 +35,8 @@ export function buildBookingPayload(cell, result, { submit }) {
     event: !result.ok ? 'booking-failed' : submit ? 'booking' : 'booking-dry-run',
     title,
     text: lines.join('\n'),
+    // Structured for an app (FCM) to open directly instead of parsing `text`.
+    url: result.ok && submit ? result.nextUrl : null,
     detectedAt: new Date().toISOString(),
   };
 }
