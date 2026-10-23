@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfig } from '../src/config.js';
-import { selectAlerts, buildPayload, buildPayloads } from '../src/watch.js';
+import { selectAlerts, buildPayload, buildPayloads, selectOrders } from '../src/watch.js';
 
 const NOW = Date.parse('2026-09-13T10:00:00Z');
 
@@ -135,4 +135,31 @@ test('grouping is one message for everything, or one each', () => {
 
 test('nothing to announce is no payload at all', () => {
   assert.deepEqual(buildPayloads([], config()), []);
+});
+
+test('selectOrders: the first order waits for the edge, the next follows while open', () => {
+  const a = item('1', true);
+  const b = item('2', true);
+  const c = item('3', true);
+  const progress = {
+    1: { placed: 0, done: false, last: null }, // never ordered
+    2: { placed: 1, done: false, last: { status: 'submitted' } }, // 1 of 2 done
+    3: { placed: 1, done: true, last: { status: 'submitted' } }, // all done
+  };
+  const pick = (fresh, allowed = null, extra = {}) =>
+    selectOrders({
+      buyable: [a, b, c],
+      fresh,
+      allowed,
+      progress: (sn) => ({ ...progress[sn], ...extra[sn] }),
+    }).map((entry) => entry.sn);
+
+  // No edge: only the product that already has an order goes on.
+  assert.deepEqual(pick([]), ['2']);
+  // An edge starts the first order; a finished product never orders again.
+  assert.deepEqual(pick([a, c]), ['1', '2']);
+  // The allow-list wins.
+  assert.deepEqual(pick([a], new Set(['1'])), ['1']);
+  // After a failure, wait for the next edge instead of retrying every poll.
+  assert.deepEqual(pick([], null, { 2: { last: { status: 'failed' } } }), []);
 });

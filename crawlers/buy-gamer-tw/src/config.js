@@ -119,6 +119,9 @@ export function loadConfig(env = process.env, { watching = true } = {}) {
       enabled: read.bool('BUYGAMER_ORDER_ENABLED', false),
       // Blank = every watched product may be ordered.
       items: parseOrderItems(read.optional('BUYGAMER_ORDER_ITEMS'), baseUrl),
+      // Orders per product (one unit each). Reaching it for every product
+      // ends a resident watch.
+      count: read.integer('BUYGAMER_ORDER_COUNT', 1, { min: 1 }),
     },
   };
 }

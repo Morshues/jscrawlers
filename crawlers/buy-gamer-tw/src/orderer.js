@@ -33,16 +33,59 @@ import { writePrivate, appendPrivate } from './private.js';
 
 const lockFile = (paths, sn) => path.join(paths.dataDir, 'locks', `${sn}.json`);
 
+/**
+ * Orders that count against BUYGAMER_ORDER_COUNT. An order whose answer was not
+ * understood, or that was mid-submit when the process died, counts too: the
+ * shop may well have it, and a duplicate is the one mistake that cannot be
+ * taken back.
+ */
+const PLACED = new Set(['submitted', 'submit-unknown', 'submitting']);
+
+/**
+ * The order history of one product, `{ sn, orders: [...] }`, or null. A lock
+ * file from before BUYGAMER_ORDER_COUNT held a single result; it reads as a
+ * history of one.
+ */
 export function readLock(paths, sn) {
+  let lock;
   try {
-    return JSON.parse(fs.readFileSync(lockFile(paths, sn), 'utf8'));
+    lock = JSON.parse(fs.readFileSync(lockFile(paths, sn), 'utf8'));
   } catch {
     return null;
   }
+  return Array.isArray(lock?.orders) ? lock : { sn, orders: [lock] };
+}
+
+function writeLock(paths, sn, orders) {
+  writePrivate(lockFile(paths, sn), `${JSON.stringify({ sn, orders }, null, 2)}\n`);
+}
+
+/** How many orders of `sn` count as placed, and whether that reaches `count`. */
+export function orderProgress(paths, sn, count) {
+  const orders = readLock(paths, sn)?.orders ?? [];
+  const placed = orders.filter((entry) => PLACED.has(entry.status)).length;
+  return { placed, done: placed >= count, last: orders.at(-1) ?? null };
+}
+
+/**
+ * Whether every product that may be ordered has its BUYGAMER_ORDER_COUNT, and
+ * how far each one got. Products are BUYGAMER_ORDER_ITEMS, or every watched
+ * product when that is blank.
+ */
+export function ordersDone(config, paths) {
+  const sns = config.order.items ? [...config.order.items] : config.items.map((item) => item.sn);
+  const items = sns.map((sn) => ({ sn, ...orderProgress(paths, sn, config.order.count) }));
+  return { done: items.length > 0 && items.every((item) => item.done), items };
 }
 
 export function clearLock(paths, sn) {
   fs.rmSync(lockFile(paths, sn), { force: true });
+}
+
+/** Only what the history needs; the full result is in orders.jsonl. */
+function lockEntry(result) {
+  const { status, startedAt, finishedAt, orderNumber, resultUrl, error } = result;
+  return { status, startedAt, finishedAt, orderNumber, resultUrl, error };
 }
 
 function stampOf(iso) {
@@ -66,9 +109,10 @@ export async function placeOrder(item, { config, order, paths, logger, signal, r
   const result = { sn: item.sn, url: item.url, startedAt, recon };
 
   try {
-    const lock = readLock(paths, item.sn);
-    if (lock && !recon) {
-      return { ...result, status: 'locked', lock };
+    const count = config.order?.count ?? 1;
+    const progress = orderProgress(paths, item.sn, count);
+    if (progress.done && !recon) {
+      return { ...result, status: 'locked', placed: progress.placed, count, lock: progress.last };
     }
 
     const {
@@ -153,13 +197,11 @@ export async function placeOrder(item, { config, order, paths, logger, signal, r
     if (recon || !order.submit) {
       result.status = 'ready';
     } else {
-      // Locked BEFORE the submit: a timeout after the shop took the order must
-      // not let the next restock order it a second time. A failed submit stays
-      // locked too, for a human to look at (--order-reset).
-      writePrivate(
-        lockFile(paths, item.sn),
-        `${JSON.stringify({ ...result, status: 'submitting' }, null, 2)}\n`,
-      );
+      // Recorded BEFORE the submit: a timeout after the shop took the order
+      // must not let the next restock order it again. A failed submit counts
+      // too, for a human to look at (--order-reset).
+      const history = readLock(paths, item.sn)?.orders ?? [];
+      writeLock(paths, item.sn, [...history, lockEntry({ ...result, status: 'submitting' })]);
       result.status = 'submit-unknown';
       const next = await submitCheckout(jar, {
         checkout: form,
@@ -201,8 +243,11 @@ export async function placeOrder(item, { config, order, paths, logger, signal, r
 
   result.finishedAt = new Date().toISOString();
   appendPrivate(path.join(paths.dataDir, 'orders.jsonl'), `${JSON.stringify(result)}\n`);
-  if (result.status === 'submitted' || result.status === 'submit-unknown') {
-    writePrivate(lockFile(paths, item.sn), `${JSON.stringify(result, null, 2)}\n`);
+  if (PLACED.has(result.status)) {
+    // Replaces the `submitting` entry written just before the submit.
+    const history = readLock(paths, item.sn)?.orders ?? [];
+    writeLock(paths, item.sn, [...history.slice(0, -1), lockEntry(result)]);
+    result.placed = history.length;
   }
   return result;
 }

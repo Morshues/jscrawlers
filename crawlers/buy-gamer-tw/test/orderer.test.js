@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { placeOrder, readLock, buildOrderPayload } from '../src/orderer.js';
+import {
+  placeOrder,
+  readLock,
+  buildOrderPayload,
+  orderProgress,
+  ordersDone,
+} from '../src/orderer.js';
 import { loadConfig } from '../src/config.js';
 
 const BASE = 'https://buy.gamer.com.tw';
@@ -11,7 +17,7 @@ const SN = '41435'; // the in-stock fixture, NT 1880 on the product page
 const fixture = (name) => fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
 const CHECKOUT = fixture('checkout-order.html').replaceAll('43077', SN).replaceAll('1990', '2950');
 
-function setup(t, { submit = true, maxPrice = 3000, actionAnswer } = {}) {
+function setup(t, { submit = true, maxPrice = 3000, actionAnswer, count } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'buygamer-'));
   const paths = { dataDir, sessionFile: path.join(dataDir, 'session.json') };
   fs.writeFileSync(paths.sessionFile, JSON.stringify({ cookies: { BAHARUNE: 'ok' } }));
@@ -31,6 +37,9 @@ function setup(t, { submit = true, maxPrice = 3000, actionAnswer } = {}) {
       case '/ajax/shopping_cart.php':
         carted = true;
         return json({});
+      case '/checkout_finish.php':
+        carted = false; // the shop empties the cart once the order is placed
+        return new Response('<p>訂單編號：A123456789</p>');
       case '/checkout_order.php':
         return new Response(CHECKOUT);
       case '/ajax/getCSRFToken.php':
@@ -39,8 +48,6 @@ function setup(t, { submit = true, maxPrice = 3000, actionAnswer } = {}) {
         return json({});
       case '/checkout_order_action.php':
         return json(actionAnswer ?? { message: `${BASE}/checkout_finish.php?o=1` });
-      case '/checkout_finish.php':
-        return new Response('<p>訂單編號：A123456789</p>');
       default:
         throw new Error(`unexpected ${pathname}`);
     }
@@ -49,7 +56,10 @@ function setup(t, { submit = true, maxPrice = 3000, actionAnswer } = {}) {
     globalThis.fetch = original;
   });
 
-  const config = loadConfig({ BUYGAMER_ITEMS: SN });
+  const config = loadConfig({
+    BUYGAMER_ITEMS: SN,
+    ...(count ? { BUYGAMER_ORDER_COUNT: String(count) } : {}),
+  });
   const order = { user: '', password: '', cookies: '', maxPrice, submit };
   return { ctx: { config, order, paths }, posts, paths };
 }
@@ -79,7 +89,10 @@ test('a full run picks 貨到付款, keeps the default store, submits and locks'
     source: 'normal',
   });
 
-  assert.equal(readLock(paths, SN).status, 'submitted');
+  assert.deepEqual(
+    readLock(paths, SN).orders.map((entry) => entry.status),
+    ['submitted'],
+  );
   assert.equal((await placeOrder(ITEM, ctx)).status, 'locked');
   assert.match(buildOrderPayload(result).title, /已下單/);
 });
@@ -117,6 +130,40 @@ test('an answer it cannot read after submitting stays locked', async (t) => {
   const { ctx, paths } = setup(t, { actionAnswer: { weird: true } });
   const result = await placeOrder(ITEM, ctx);
   assert.equal(result.status, 'submit-unknown');
-  assert.equal(readLock(paths, SN).status, 'submit-unknown');
+  assert.equal(readLock(paths, SN).orders[0].status, 'submit-unknown');
+  assert.equal(orderProgress(paths, SN, 1).done, true);
   assert.match(buildOrderPayload(result).title, /結果不明/);
+});
+
+test('BUYGAMER_ORDER_COUNT=2 places two orders, then stops', async (t) => {
+  const { ctx, paths } = setup(t, { count: 2 });
+
+  assert.equal((await placeOrder(ITEM, ctx)).status, 'submitted');
+  assert.deepEqual(ordersDone(ctx.config, paths).items, [
+    { sn: SN, placed: 1, done: false, last: readLock(paths, SN).orders[0] },
+  ]);
+
+  const second = await placeOrder(ITEM, ctx);
+  assert.equal(second.status, 'submitted');
+  assert.equal(second.placed, 2);
+  assert.equal(ordersDone(ctx.config, paths).done, true);
+
+  const third = await placeOrder(ITEM, ctx);
+  assert.equal(third.status, 'locked');
+  assert.equal(readLock(paths, SN).orders.length, 2);
+});
+
+test('a lock file from before order counts reads as one order', (t) => {
+  const { paths } = setup(t);
+  fs.mkdirSync(path.join(paths.dataDir, 'locks'));
+  fs.writeFileSync(
+    path.join(paths.dataDir, 'locks', `${SN}.json`),
+    JSON.stringify({ sn: SN, status: 'submitted', finishedAt: '2026-10-12T09:42:08Z' }),
+  );
+  assert.deepEqual(orderProgress(paths, SN, 1), {
+    placed: 1,
+    done: true,
+    last: { sn: SN, status: 'submitted', finishedAt: '2026-10-12T09:42:08Z' },
+  });
+  assert.equal(orderProgress(paths, SN, 2).done, false);
 });

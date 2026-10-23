@@ -98,9 +98,17 @@ chmod 600 ~/.config/buy-gamer-tw/order.env   # 不是 600 會拒絕執行
 | `~/.config/buy-gamer-tw/session.json`      | 登入後的 cookie，下次沿用                 |
 | `~/.local/share/buy-gamer-tw/orders.jsonl` | 每次下單的結果                            |
 | `~/.local/share/buy-gamer-tw/pages/`       | 結帳頁原始 HTML（含姓名地址）             |
-| `~/.local/share/buy-gamer-tw/locks/`       | 下過單的商品，不會再自動下第二次          |
+| `~/.local/share/buy-gamer-tw/locks/`       | 每件商品下過的訂單，用來計算下單次數      |
 
-repo 的 `.env` 只放開關：`BUYGAMER_ORDER_ENABLED=true`，以及 `BUYGAMER_ORDER_ITEMS`（只自動下這些，留白 = 全部）。
+repo 的 `.env` 只放非機密的設定：
+
+- `BUYGAMER_ORDER_ENABLED=true`：開啟自動下單。
+- `BUYGAMER_ORDER_ITEMS`：只自動下這些商品，留白 = 全部監看商品。
+- `BUYGAMER_ORDER_COUNT`（預設 1）：每件商品總共下幾張訂單，每張 1 個。第一張等「售罄 → 可下單」的那一刻；
+  成功之後只要還能買，下一輪就接著下下一張。失敗的話等下一次補貨才重試。
+
+**下滿就結束：** 常駐監看（`--interval`）在 `BUYGAMER_ORDER_ITEMS` 裡每件都下滿之後自動結束；啟動時已經
+下滿的話，會直接結束、不輪詢。要再買同一件，先 `--order-reset <sn>`。
 
 ### 登入
 
@@ -113,8 +121,8 @@ repo 的 `.env` 只放開關：`BUYGAMER_ORDER_ENABLED=true`，以及 `BUYGAMER_
 ```bash
 npm run crawl buy-gamer-tw -- --login-test          # 只驗證登入，列出購物車
 npm run crawl buy-gamer-tw -- --order-recon 43077   # 走到確認訂單資料為止，不送出、不上鎖、不通知
-npm run crawl buy-gamer-tw -- --order 43077         # 手動下單一次（SUBMIT=true 才送出，送出後上鎖）
-npm run crawl buy-gamer-tw -- --order-reset 43077   # 解鎖，允許再次自動下單
+npm run crawl buy-gamer-tw -- --order 43077         # 手動下單一次（SUBMIT=true 才送出，送出後算進下單次數）
+npm run crawl buy-gamer-tw -- --order-reset 43077   # 下單次數歸零，允許再次自動下單
 ```
 
 ### 安全檢查
@@ -124,7 +132,7 @@ npm run crawl buy-gamer-tw -- --order-reset 43077   # 解鎖，允許再次自�
 - 送出前核對：訂單裡只有這一件、數量 1、付款方式是貨到付款、總額不超過上限
   （`order.js` 的 `checkConfirmation`），任何一項不符就不送。
 - `BUYGAMER_ORDER_SUBMIT=false`（預設）時只走到核對完成，通知你「未送出」。
-- 送出**之前**就先上鎖，送出後不論成功或回應看不懂都維持上鎖，避免逾時重試造成重複訂單；
+- 送出**之前**就先記一筆，送出後不論成功或回應看不懂都算進下單次數，避免逾時重試造成重複訂單；
   回應看不懂時通知「結果不明」，請到商城訂單查詢確認。
 - 首次觀測（沒有基準線）的商品不會自動下單；`--dry-run` 只印出會下單的商品。
 

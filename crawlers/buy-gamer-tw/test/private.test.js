@@ -50,7 +50,16 @@ test('loadOrderConfig needs a login and a price cap', () => {
 });
 
 test('ordering is off by default and the allow-list takes URLs too', () => {
-  assert.deepEqual(loadConfig({ BUYGAMER_ITEMS: '1' }).order, { enabled: false, items: null });
+  assert.deepEqual(loadConfig({ BUYGAMER_ITEMS: '1' }).order, {
+    enabled: false,
+    items: null,
+    count: 1,
+  });
+  assert.equal(loadConfig({ BUYGAMER_ITEMS: '1', BUYGAMER_ORDER_COUNT: '3' }).order.count, 3);
+  assert.throws(
+    () => loadConfig({ BUYGAMER_ITEMS: '1', BUYGAMER_ORDER_COUNT: '0' }),
+    /BUYGAMER_ORDER_COUNT/,
+  );
   const { order } = loadConfig({
     BUYGAMER_ITEMS: '1',
     BUYGAMER_ORDER_ENABLED: 'true',

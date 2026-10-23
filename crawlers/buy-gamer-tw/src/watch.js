@@ -94,3 +94,25 @@ export function buildPayloads(items, config, options) {
   if (config.notify.grouped) return [buildPayload(items, config, options)];
   return items.map((item) => buildPayload([item], config, options));
 }
+
+/**
+ * Which orderable products to place an order for this poll.
+ *
+ * The first order of a product waits for a restock edge (`fresh`), like the
+ * notification. Once an order of it has gone through and it is still
+ * orderable, the next one (up to BUYGAMER_ORDER_COUNT) follows on the next
+ * poll instead of waiting for another restock. A failed attempt waits for the
+ * next edge, so a broken login does not hammer the checkout every interval.
+ *
+ * @param {{ buyable: object[], fresh: object[], allowed: Set<string> | null,
+ *   progress: (sn: string) => { placed: number, done: boolean, last: { status: string } | null } }} options
+ */
+export function selectOrders({ buyable, fresh, allowed, progress }) {
+  const freshSns = new Set(fresh.map((item) => item.sn));
+  return buyable.filter((item) => {
+    if (allowed && !allowed.has(item.sn)) return false;
+    const { placed, done, last } = progress(item.sn);
+    if (done) return false;
+    return freshSns.has(item.sn) || (placed > 0 && last?.status === 'submitted');
+  });
+}

@@ -15,10 +15,10 @@ import {
 import { loadConfig, loadOrderConfig, parseDuration, parseItems } from './config.js';
 import { fetchSnapshot } from './item.js';
 import { diffItems } from './diff.js';
-import { selectAlerts, buildPayloads } from './watch.js';
+import { selectAlerts, buildPayloads, selectOrders } from './watch.js';
 import { privatePaths, readOrderEnv } from './private.js';
 import { login } from './session.js';
-import { placeOrder, buildOrderPayload, clearLock } from './orderer.js';
+import { placeOrder, buildOrderPayload, clearLock, orderProgress, ordersDone } from './orderer.js';
 
 const NAME = 'buy-gamer-tw';
 const STATE_FILE = 'state.json';
@@ -29,7 +29,7 @@ const FLAGS = {
   'notify-test': { type: 'boolean', default: false },
   order: { type: 'string' }, // sn or URL: order it once, now
   'order-recon': { type: 'string' }, // sn or URL: cart it and save the checkout pages
-  'order-reset': { type: 'string' }, // sn: allow ordering it again
+  'order-reset': { type: 'string' }, // sn: forget its orders, count from zero again
   'login-test': { type: 'boolean', default: false },
 };
 const { values } = parseArgs(FLAGS);
@@ -47,6 +47,20 @@ if (unknown.length > 0) {
   process.exit(2);
 }
 
+function ordersFor({ config, orderCtx, buyable, fresh }) {
+  return selectOrders({
+    buyable,
+    fresh,
+    allowed: config.order.items,
+    progress: (sn) => orderProgress(orderCtx.paths, sn, config.order.count),
+  });
+}
+
+/** "42810 1/1, 41435 0/2" for the log. */
+function describeProgress(items, count) {
+  return items.map((item) => `${item.sn} ${item.placed}/${count}`).join(', ');
+}
+
 /** The private half of ordering: paths outside the repo + the order env file. */
 function loadOrderContext() {
   const paths = privatePaths();
@@ -58,7 +72,10 @@ function logOrderResult(result, log) {
   const how = `NT ${result.total ?? result.price}・${result.payment ?? ''}・${result.ship ?? ''}`;
   switch (result.status) {
     case 'submitted':
-      log.warn(`已下單：${name}（${how}）訂單編號 ${result.orderNumber ?? '未讀到'}`);
+      log.warn(
+        `已下單：${name}（${how}）訂單編號 ${result.orderNumber ?? '未讀到'}` +
+          `${result.placed ? `，第 ${result.placed} 張` : ''}`,
+      );
       break;
     case 'ready':
       log.warn(`確認訂單資料無誤，未送出：${name}（${how}）`);
@@ -66,7 +83,7 @@ function logOrderResult(result, log) {
       break;
     case 'locked':
       log.info(
-        `${name} 已在 ${result.lock.finishedAt} 下過單，略過（--order-reset ${result.sn} 解除）`,
+        `${name} 已下滿 ${result.placed}/${result.count} 張，略過（--order-reset ${result.sn} 重新計算）`,
       );
       break;
     case 'submit-unknown':
@@ -148,7 +165,7 @@ async function pollOnce({ config, log, signal, notify, dryRun, orderCtx }) {
       log.info(`[dry-run] 將發出通知：\n${payload.title}\n${payload.text}`);
     if (fresh.length === 0) log.info('[dry-run] 沒有需要通知的商品');
     if (orderCtx) {
-      for (const item of fresh.filter((i) => !config.order.items || config.order.items.has(i.sn)))
+      for (const item of ordersFor({ config, orderCtx, buyable, fresh }))
         log.info(`[dry-run] 將自動下單：${item.sn} ${item.title}`);
     }
     return { snapshot, events, buyable, fresh, notified: false };
@@ -197,9 +214,9 @@ async function pollOnce({ config, log, signal, notify, dryRun, orderCtx }) {
   // Ordering goes before the notification: when a restock lasts minutes, the
   // second a notify call takes is better spent at the checkout.
   if (orderCtx) {
-    for (const item of fresh) {
-      if (config.order.items && !config.order.items.has(item.sn)) continue;
-      log.warn(`自動下單：${item.sn} ${item.title}`);
+    for (const item of ordersFor({ config, orderCtx, buyable, fresh })) {
+      const { placed } = orderProgress(orderCtx.paths, item.sn, config.order.count);
+      log.warn(`自動下單：${item.sn} ${item.title}（第 ${placed + 1}/${config.order.count} 張）`);
       const result = await placeOrder(item, { ...orderCtx, config, logger: log, signal });
       logOrderResult(result, log);
       if (result.status !== 'locked') await notify(buildOrderPayload(result), { signal });
@@ -260,7 +277,7 @@ await runCrawler(NAME, async ({ log, signal }) => {
   if (values['order-reset']) {
     const [{ sn }] = parseItems(values['order-reset'], config.baseUrl, '--order-reset');
     clearLock(privatePaths(), sn);
-    log.info(`sn=${sn} 可以再次自動下單`);
+    log.info(`sn=${sn} 下單次數歸零，可以再次自動下單`);
     return { sn };
   }
 
@@ -283,7 +300,7 @@ await runCrawler(NAME, async ({ log, signal }) => {
   const orderCtx = config.order.enabled ? loadOrderContext() : null;
   if (orderCtx) {
     log.info(
-      `自動下單已啟用（上限 NT ${orderCtx.order.maxPrice}` +
+      `自動下單已啟用（上限 NT ${orderCtx.order.maxPrice}，每件 ${config.order.count} 張` +
         `${config.order.items ? `，限 ${[...config.order.items].join(', ')}` : ''}）`,
     );
   }
@@ -296,11 +313,28 @@ await runCrawler(NAME, async ({ log, signal }) => {
   if (!values.interval) return pollOnce({ config, log, signal, notify, dryRun, orderCtx });
 
   // Resident mode. A single failed poll must not end the watch — the next one
-  // may well be the restock we are waiting for.
-  return pollLoop({
-    task: () => pollOnce({ config, log, signal, notify, dryRun, orderCtx }),
+  // may well be the restock we are waiting for. With ordering on, the watch
+  // has a goal, and reaching it (every product ordered BUYGAMER_ORDER_COUNT
+  // times) ends it.
+  const finished = new AbortController();
+  const checkFinished = () => {
+    if (!orderCtx || dryRun) return false;
+    const { done, items } = ordersDone(config, orderCtx.paths);
+    if (!done) return false;
+    log.info(`全部下單完成（${describeProgress(items, config.order.count)}），結束監看`);
+    finished.abort();
+    return true;
+  };
+  if (checkFinished()) return { runs: 0, failures: 0, finished: true };
+
+  const loop = await pollLoop({
+    task: async () => {
+      await pollOnce({ config, log, signal, notify, dryRun, orderCtx });
+      checkFinished();
+    },
     intervalMs,
-    signal,
+    signal: AbortSignal.any([signal, finished.signal]),
     logger: log,
   });
+  return { ...loop, finished: finished.signal.aborted };
 });
